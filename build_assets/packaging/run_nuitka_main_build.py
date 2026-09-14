@@ -400,6 +400,10 @@ def _build_command(project_root: Path, output_dir: str) -> list[str]:
         "--windows-icon-from-ico=resources/icon.ico",
         "--windows-uac-admin",
         "--enable-plugins=pyside6",
+        # BAT 是非交互环境，Nuitka 在 DLL 依赖扫描阶段会问"是否下载 Dependency Walker"，
+        # 默认拒绝会让 standalone 构建报 "FATAL: ... without." 失败。
+        # 这里显式同意下载，ccache/Dependency Walker 等外部工具都会被允许拉取。
+        "--assume-yes-for-downloads",
     ]
 
     local_modules: list[str] = []

@@ -58,6 +58,12 @@
       "bundled": true
     },
     {
+      "name": "cryptography",
+      "version": "44.0.0",
+      "direct": true,
+      "bundled": false
+    },
+    {
       "name": "dxcam",
       "version": "0.0.5",
       "direct": true,
@@ -296,7 +302,7 @@
     },
     {
       "name": "certifi",
-      "version": "2026.1.4",
+      "version": "2026.7.22",
       "direct": false,
       "bundled": true,
       "required_by": [
@@ -305,7 +311,7 @@
     },
     {
       "name": "charset-normalizer",
-      "version": "3.4.4",
+      "version": "3.5.1",
       "direct": false,
       "bundled": true,
       "required_by": [
@@ -351,7 +357,7 @@
     },
     {
       "name": "idna",
-      "version": "3.11",
+      "version": "3.19",
       "direct": false,
       "bundled": true,
       "required_by": [
@@ -378,7 +384,7 @@
     },
     {
       "name": "protobuf",
-      "version": "7.34.1",
+      "version": "7.36.1",
       "direct": false,
       "bundled": false,
       "required_by": [
@@ -396,7 +402,7 @@
     },
     {
       "name": "pyreadline3",
-      "version": "3.5.4",
+      "version": "3.5.6",
       "direct": false,
       "bundled": true,
       "required_by": [
@@ -405,7 +411,7 @@
     },
     {
       "name": "requests",
-      "version": "2.32.5",
+      "version": "2.34.2",
       "direct": false,
       "bundled": true,
       "required_by": [
@@ -432,7 +438,7 @@
     },
     {
       "name": "urllib3",
-      "version": "2.6.3",
+      "version": "2.7.0",
       "direct": false,
       "bundled": true,
       "required_by": [

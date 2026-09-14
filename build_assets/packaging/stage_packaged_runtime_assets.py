@@ -15,6 +15,19 @@ if str(PROJECT_ROOT_FOR_IMPORTS) not in sys.path:
 
 from services.ocr_runtime_contract import OCR_REQUIRED_RUNTIME_DLLS
 
+
+def _resolve_venv_site_packages(project_root: Path, override: str | None) -> Path:
+    """优先使用 --venv-site-packages 显式传入；否则委托给 worker_entry 解析。"""
+    if override:
+        path = Path(override).resolve(strict=False)
+        if not path.is_dir():
+            raise FileNotFoundError(f"--venv-site-packages 指向的目录不存在: {path}")
+        return path
+    # 延迟导入避免脚本被作为模块导入时强依赖 worker_entry 的间接依赖。
+    from app_core.runtime.worker_entry import resolve_project_site_packages_dir
+    return Path(resolve_project_site_packages_dir(str(project_root))).resolve(strict=False)
+
+
 # 发行包只带这四个；xx.dat 为大漠附属，缺则跳过。其它文件一律不进包。
 PLUGIN_PACK_FILES = ("PluginHost.exe", "dm.dll", "RegDll.dll", "xx.dat")
 
@@ -28,9 +41,23 @@ def iter_plugin_pack_files(plugin_dir: Path):
             yield name, item
 
 
-def _resolve_existing_path(project_root: Path, candidates: list[str], *, label: str, expect_dir: bool = False) -> Path:
+def _resolve_existing_path(
+    project_root: Path,
+    candidates: list[str],
+    *,
+    label: str,
+    expect_dir: bool = False,
+    venv_site_packages: Path | None = None,
+) -> Path:
     for relative_path in candidates:
-        candidate = (project_root / relative_path).resolve(strict=False)
+        # 含 "{site_packages}" 占位符：用传入的 venv site-packages 目录替换。
+        # 其余候选按相对 project_root 解析（保留旧逻辑，向后兼容）。
+        if "{site_packages}" in relative_path:
+            if venv_site_packages is None:
+                continue
+            candidate = (venv_site_packages / relative_path.split("{site_packages}/", 1)[-1]).resolve(strict=False)
+        else:
+            candidate = (project_root / relative_path).resolve(strict=False)
         if expect_dir and candidate.is_dir():
             return candidate
         if not expect_dir and candidate.is_file():
@@ -88,7 +115,7 @@ def _remove_duplicate_runtime_files(dist_root: Path) -> list[tuple[Path, int]]:
     return removed
 
 
-def _stage_qt_platform_plugin(project_root: Path, dist_root: Path) -> None:
+def _stage_qt_platform_plugin(project_root: Path, dist_root: Path, venv_site_packages: Path) -> None:
     print("[4/6] Copy Qt platform plugin...")
     canonical = dist_root / _QT_QWINDOWS_CANONICAL
     extra = dist_root / _QT_QWINDOWS_DUPLICATE
@@ -100,24 +127,24 @@ def _stage_qt_platform_plugin(project_root: Path, dist_root: Path) -> None:
     source = _resolve_existing_path(
         project_root,
         [
-            "venv/Lib/site-packages/PySide6/plugins/platforms/qwindows.dll",
-            "venv/lib/site-packages/PySide6/plugins/platforms/qwindows.dll",
+            "{site_packages}/PySide6/plugins/platforms/qwindows.dll",
         ],
         label="qwindows.dll",
+        venv_site_packages=venv_site_packages,
     )
     _copy_required_file(source, canonical, label="qwindows.dll")
 
 
-def _stage_ocr_runtime(project_root: Path, dist_root: Path) -> None:
+def _stage_ocr_runtime(project_root: Path, dist_root: Path, venv_site_packages: Path) -> None:
     print("[5/6] Restore required ONNX Runtime DLLs...")
     onnxruntime_capi = _resolve_existing_path(
         project_root,
         [
-            "venv/Lib/site-packages/onnxruntime/capi",
-            "venv/lib/site-packages/onnxruntime/capi",
+            "{site_packages}/onnxruntime/capi",
         ],
         label="onnxruntime capi",
         expect_dir=True,
+        venv_site_packages=venv_site_packages,
     )
 
     for relative in OCR_REQUIRED_RUNTIME_DLLS:
@@ -198,16 +225,22 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Stage packaged runtime assets for release build")
     parser.add_argument("--project-root", required=True, help="Project root directory")
     parser.add_argument("--dist", required=True, help="Packaged dist directory")
+    parser.add_argument(
+        "--venv-site-packages",
+        default=None,
+        help="Path to venv site-packages directory. If omitted, resolved via worker_entry (.venv/venv).",
+    )
     args = parser.parse_args()
 
     project_root = Path(args.project_root).resolve(strict=False)
     dist_root = Path(args.dist).resolve(strict=False)
+    venv_site_packages = _resolve_venv_site_packages(project_root, args.venv_site_packages)
 
     if not dist_root.is_dir():
         raise FileNotFoundError(f"缺少打包输出目录: {dist_root}")
 
-    _stage_qt_platform_plugin(project_root, dist_root)
-    _stage_ocr_runtime(project_root, dist_root)
+    _stage_qt_platform_plugin(project_root, dist_root, venv_site_packages)
+    _stage_ocr_runtime(project_root, dist_root, venv_site_packages)
     _stage_interception_files(project_root, dist_root)
     _stage_plugin_runtime(project_root, dist_root)
     _remove_unused_bundled_tools(dist_root)

@@ -20,13 +20,30 @@ echo ========================================
 echo.
 
 set "STEP=CHECK_VENV"
-if not exist "venv\Scripts\python.exe" (
-    set "ERRMSG=Missing venv\Scripts\python.exe"
+REM 解析项目内的虚拟环境：优先 .venv，回落到 venv。
+REM BAT 直接探测这两个候选，避免在 BAT 中调用 Python 解析（避免 py 启动错版本）。
+set "VENV_DIR="
+set "VENV_SCRIPTS="
+set "VENV_PYTHON="
+set "VENV_SITE_PACKAGES="
+for %%N in (.venv venv) do (
+    if not defined VENV_PYTHON (
+        if exist "%PROJECT_ROOT%\%%N\Scripts\python.exe" (
+            set "VENV_DIR=%PROJECT_ROOT%\%%N"
+            set "VENV_SCRIPTS=%PROJECT_ROOT%\%%N\Scripts"
+            set "VENV_PYTHON=%PROJECT_ROOT%\%%N\Scripts\python.exe"
+            set "VENV_SITE_PACKAGES=%PROJECT_ROOT%\%%N\Lib\site-packages"
+        )
+    )
+)
+
+if not defined VENV_PYTHON (
+    set "ERRMSG=Missing virtual environment under %PROJECT_ROOT% (expected .venv or venv with Scripts\python.exe)"
     goto fail
 )
-venv\Scripts\python.exe --version >nul 2>&1
+"%VENV_PYTHON%" --version >nul 2>&1
 if errorlevel 1 (
-    set "ERRMSG=Broken venv\\Scripts\\python.exe, please repair the base Python referenced by venv\\pyvenv.cfg"
+    set "ERRMSG=Broken python interpreter at %VENV_PYTHON%, please repair the base Python referenced by pyvenv.cfg"
     goto fail
 )
 
@@ -37,7 +54,7 @@ set "BUILD_DIR=%BUILD_OUTPUT_DIR%\main.build"
 
 set "STEP=ENSURE_AV_EXCLUSIONS"
 echo [0.1/6] Ensure Windows Defender exclusions for packaging...
-venv\Scripts\python.exe build_assets\packaging\ensure_packaging_av_exclusions.py --project-root "%PROJECT_ROOT%"
+%VENV_PYTHON% build_assets\packaging\ensure_packaging_av_exclusions.py --project-root "%PROJECT_ROOT%"
 if errorlevel 1 (
     set "ERRMSG=Windows Defender blocked packaging files; add exclusions or rerun as Administrator"
     goto fail
@@ -46,7 +63,7 @@ if errorlevel 1 (
 if "%LCA_INSTALLER_ONLY%"=="1" goto installer_from_existing
 
 set "STEP=VERIFY_THIRD_PARTY_MANIFEST"
-venv\Scripts\python.exe build_assets\packaging\verify_third_party_manifest.py --require-all
+%VENV_PYTHON% build_assets\packaging\verify_third_party_manifest.py --require-all
 if errorlevel 1 (
     set "ERRMSG=Third-party manifest verification failed"
     goto fail
@@ -68,7 +85,7 @@ echo.
 echo [2/6] Build main.exe with Nuitka...
 echo.
 
-venv\Scripts\python.exe build_assets\packaging\run_nuitka_main_build.py --project-root "%PROJECT_ROOT%" --output-dir "%BUILD_OUTPUT_DIR%"
+%VENV_PYTHON% build_assets\packaging\run_nuitka_main_build.py --project-root "%PROJECT_ROOT%" --output-dir "%BUILD_OUTPUT_DIR%"
 
 if errorlevel 1 (
     set "ERRMSG=Nuitka main build failed"
@@ -82,7 +99,7 @@ if not exist "%DIST%\main.exe" (
 
 set "STEP=VERIFY_TASK_MODULES"
 echo [2.05/6] Verify packaged task modules...
-venv\Scripts\python.exe build_assets\packaging\verify_packaged_task_modules.py --build-dir "%BUILD_DIR%"
+%VENV_PYTHON% build_assets\packaging\verify_packaged_task_modules.py --build-dir "%BUILD_DIR%"
 if errorlevel 1 (
     set "ERRMSG=Packaged task module verification failed"
     goto fail
@@ -90,7 +107,7 @@ if errorlevel 1 (
 
 set "STEP=INJECT_WINDOWS_MANIFEST"
 echo [2.1/6] Inject Windows DPI manifest...
-venv\Scripts\python.exe build_assets\packaging\inject_windows_manifest.py --exe "%DIST%\main.exe" --manifest "%SCRIPT_DIR_NOSLASH%\lca_main.manifest"
+%VENV_PYTHON% build_assets\packaging\inject_windows_manifest.py --exe "%DIST%\main.exe" --manifest "%SCRIPT_DIR_NOSLASH%\lca_main.manifest"
 if errorlevel 1 (
     set "ERRMSG=Inject Windows DPI manifest failed"
     goto fail
@@ -99,7 +116,7 @@ if errorlevel 1 (
 REM 离线双身份：清单注入之后再盖编辑器印记（避免被其它资源更新冲掉）
 set "STEP=STAMP_EDITOR_ENTRY"
 echo [2.15/6] Stamp editor entry identity into main.exe...
-venv\Scripts\python.exe -c "from pathlib import Path; from app_core.player.entry_stamp import ENTRY_EDITOR, apply_entry_stamp; p=Path(r'%DIST%\main.exe'); apply_entry_stamp(p, ENTRY_EDITOR); print('entry_stamp=editor path='+str(p))"
+%VENV_PYTHON% -c "from pathlib import Path; from app_core.player.entry_stamp import ENTRY_EDITOR, apply_entry_stamp; p=Path(r'%DIST%\main.exe'); apply_entry_stamp(p, ENTRY_EDITOR); print('entry_stamp=editor path='+str(p))"
 if errorlevel 1 (
     set "ERRMSG=Stamp editor entry identity failed"
     goto fail
@@ -108,17 +125,17 @@ if errorlevel 1 (
 set "STEP=CHECK_CORE_RESOURCES"
 echo [2.5/6] Check required resources...
 
-if not exist "venv\Lib\site-packages\uiautomation\bin\UIAutomationClient_VC140_X64.dll" (
+if not exist "%VENV_SITE_PACKAGES%\uiautomation\bin\UIAutomationClient_VC140_X64.dll" (
     set "ERRMSG=Missing source UIAutomationClient_VC140_X64.dll"
     goto fail
 )
-if not exist "venv\Lib\site-packages\uiautomation\bin\UIAutomationClient_VC140_X86.dll" (
+if not exist "%VENV_SITE_PACKAGES%\uiautomation\bin\UIAutomationClient_VC140_X86.dll" (
     set "ERRMSG=Missing source UIAutomationClient_VC140_X86.dll"
     goto fail
 )
 if not exist "%DIST%\uiautomation\bin" mkdir "%DIST%\uiautomation\bin"
 for %%f in (UIAutomationClient_VC140_X64.dll UIAutomationClient_VC140_X86.dll) do (
-    copy /y "venv\Lib\site-packages\uiautomation\bin\%%f" "%DIST%\uiautomation\bin\%%f" >nul 2>&1
+    copy /y "%VENV_SITE_PACKAGES%\uiautomation\bin\%%f" "%DIST%\uiautomation\bin\%%f" >nul 2>&1
     if not exist "%DIST%\uiautomation\bin\%%f" (
         set "ERRMSG=Missing UIAutomation runtime DLL: %%f"
         goto fail
@@ -193,7 +210,7 @@ for %%f in (msvcp140.dll vcruntime140.dll vcruntime140_1.dll) do (
 )
 
 set "STEP=STAGE_PACKAGED_RUNTIME_ASSETS"
-venv\Scripts\python.exe build_assets\packaging\stage_packaged_runtime_assets.py --project-root "%PROJECT_ROOT%" --dist "%DIST%"
+%VENV_PYTHON% build_assets\packaging\stage_packaged_runtime_assets.py --project-root "%PROJECT_ROOT%" --dist "%DIST%"
 if errorlevel 1 (
     set "ERRMSG=Stage packaged runtime assets failed"
     goto fail
@@ -201,14 +218,14 @@ if errorlevel 1 (
 
 set "STEP=VERIFY_PACKAGED_OCR_RUNTIME"
 echo [5.7/6] Verify offline PP-OCRv4 runtime...
-venv\Scripts\python.exe build_assets\packaging\verify_packaged_ocr_runtime.py --dist "%DIST%"
+%VENV_PYTHON% build_assets\packaging\verify_packaged_ocr_runtime.py --dist "%DIST%"
 if errorlevel 1 (
     set "ERRMSG=Packaged OCR runtime verification failed"
     goto fail
 )
 
 set "STEP=VERIFY_NO_SOURCE_FILES"
-venv\Scripts\python.exe build_assets\packaging\verify_no_source_files.py --dist "%DIST%"
+%VENV_PYTHON% build_assets\packaging\verify_no_source_files.py --dist "%DIST%"
 if errorlevel 1 (
     set "ERRMSG=Packaged dist still contains Python source files"
     goto fail
@@ -216,19 +233,19 @@ if errorlevel 1 (
 
 set "STEP=CHECK_SUBPROCESS_RUNTIME"
 echo [5.8/6] Smoke test final packaged subprocess workers...
-venv\Scripts\python.exe build_assets\packaging\verify_packaged_subprocess_workers.py --exe "%DIST%\main.exe" --build-dir "%BUILD_DIR%"
+%VENV_PYTHON% build_assets\packaging\verify_packaged_subprocess_workers.py --exe "%DIST%\main.exe" --build-dir "%BUILD_DIR%"
 if errorlevel 1 (
     set "ERRMSG=Packaged subprocess workers smoke test failed"
     goto fail
 )
 
 set "STEP=WRITE_BUILD_METADATA"
-venv\Scripts\python.exe build_assets\packaging\write_build_metadata.py --dist "%DIST%"
+%VENV_PYTHON% build_assets\packaging\write_build_metadata.py --dist "%DIST%"
 if errorlevel 1 (
     set "ERRMSG=Build metadata generation failed"
     goto fail
 )
-venv\Scripts\python.exe build_assets\packaging\generate_sbom.py --output "%DIST%\sbom.cdx.json"
+%VENV_PYTHON% build_assets\packaging\generate_sbom.py --output "%DIST%\sbom.cdx.json"
 if errorlevel 1 (
     set "ERRMSG=SBOM generation failed"
     goto fail
@@ -262,7 +279,7 @@ if not exist "%DIST%\main.exe" (
     goto fail
 )
 set "STEP=STAGE_PACKAGED_RUNTIME_ASSETS"
-venv\Scripts\python.exe build_assets\packaging\stage_packaged_runtime_assets.py --project-root "%PROJECT_ROOT%" --dist "%DIST%"
+%VENV_PYTHON% build_assets\packaging\stage_packaged_runtime_assets.py --project-root "%PROJECT_ROOT%" --dist "%DIST%"
 if errorlevel 1 (
     set "ERRMSG=Stage packaged runtime assets failed"
     goto fail
@@ -280,6 +297,7 @@ for %%p in (
     "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
     "C:\Program Files\Inno Setup 6\ISCC.exe"
     "D:\Inno Setup 6\ISCC.exe"
+    "D:\app\Scoop\apps\inno-setup\current\ISCC.exe"
 ) do if exist %%p set "ISCC=%%~p"
 
 if "%ISCC%"=="" (
@@ -291,7 +309,7 @@ if "%ISCC%"=="" (
 )
 
 set "STEP=VERIFY_STAGED_PLUGIN_RUNTIME"
-venv\Scripts\python.exe build_assets\packaging\ensure_packaging_av_exclusions.py --project-root "%PROJECT_ROOT%" --verify-dist "%DIST%" --skip-add
+%VENV_PYTHON% build_assets\packaging\ensure_packaging_av_exclusions.py --project-root "%PROJECT_ROOT%" --verify-dist "%DIST%" --skip-add
 if errorlevel 1 (
     set "ERRMSG=Staged plugin runtime missing or quarantined before Inno Setup"
     goto fail
