@@ -4,7 +4,7 @@
 
 <img width="499" height="392" alt="78aeed73342cb81cc476302f02a8b529" src="https://github.com/user-attachments/assets/3d084b12-690c-42ca-b4c8-de2108418926" />
 
-该软件纯照搬本人免费开源代码，还进行收费
+该软件纯照搬本人免费开源代码，未有任何声明
 
 
 交流Q群：15740321
