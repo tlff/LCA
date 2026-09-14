@@ -81,7 +81,13 @@ def resolve_project_root(project_root: Optional[str] = None) -> str:
 
 
 def resolve_project_venv_root(project_root: Optional[str] = None) -> str:
-    return os.path.join(resolve_project_root(project_root), "venv")
+    root = resolve_project_root(project_root)
+    for candidate in (".venv", "venv"):
+        candidate_path = os.path.join(root, candidate)
+        if os.path.isdir(candidate_path):
+            return candidate_path
+    # 保持向后兼容：仍返回默认 ".venv"，让上层抛清晰错误
+    return os.path.join(root, ".venv")
 
 
 def resolve_project_venv_scripts_dir(project_root: Optional[str] = None) -> str:

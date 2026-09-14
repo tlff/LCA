@@ -101,3 +101,4 @@ lcaa.top_cert/
 docs/
 resources/icon_candidates/
 pytest.ini
+.codebase-memory
