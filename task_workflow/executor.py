@@ -6,6 +6,7 @@ import os
 import re
 import time
 import threading
+from collections import deque
 from typing import Callable, Dict, List, Any, Optional, Set, Tuple
 from PySide6.QtCore import QObject, Signal, QThread
 from task_workflow.card_display import find_card_by_id, format_step_detail
@@ -1884,6 +1885,9 @@ class WorkflowExecutor(QObject):
             # 工具 用户要求：删除无限循环限制，允许任务真正无限执行
             retry_counts = {}  # 记录每个卡片的重试次数
             last_card_success = True  # 记录最后一个卡片的执行状态
+            # 方案 A3：当一个节点有多个 sequential 后续时，多分支按顺序串行执行。
+            # 仅在检测到多条 sequential 后续时填充队列，单条 sequential 仍走原 _find_next_card。
+            pending_sequential: deque[int] = deque()
 
             while current_card_id is not None:
                 execution_count += 1
@@ -2074,7 +2078,12 @@ class WorkflowExecutor(QObject):
                 if not will_loop_to_self and next_card_id is None:
                     connections = self._connections_map.get(current_card_id, [])
                     # random 连接会在查找下一卡片时随机决策，这里不提前推断，避免改变原有行为
-                    if not any(c.get('type') == 'random' for c in connections):
+                    has_random = any(c.get('type') == 'random' for c in connections)
+                    # 方案 A3：当 sequential 出向有多条时，跳过"跳回自己"预判；
+                    # 多分支下走完当前节点后还会继续走后续分支，UI 信号照常发。
+                    sequential_count = sum(1 for c in connections if c.get('type') == 'sequential')
+                    multi_sequential = sequential_count > 1
+                    if not has_random and not multi_sequential:
                         preferred_types = ['success', 'sequential'] if success else ['failure', 'sequential']
                         for connection_type in preferred_types:
                             matched_connection = next(
@@ -2255,10 +2264,27 @@ class WorkflowExecutor(QObject):
 
                 # 如果没有指定下一个卡片，根据连接查找
                 if next_card_id is None:
-                    next_card_id = self._find_next_card(
-                        current_card_id,
-                        success,
-                    )
+                    if pending_sequential:
+                        # 已经在多分支队列里：取下一个串行目标
+                        next_card_id = pending_sequential.popleft()
+                        logger.debug(
+                            f"[A3 多分支队列] 取出下一个串行节点: {next_card_id}，队列剩余 {len(pending_sequential)}"
+                        )
+                    else:
+                        # 先看 sequential 端口有没有多条出向边（方案 A3 触发条件）
+                        sequential_targets = self._graph_engine.next_cards_sequential(current_card_id)
+                        if len(sequential_targets) > 1:
+                            pending_sequential.extend(sequential_targets)
+                            next_card_id = pending_sequential.popleft()
+                            logger.info(
+                                f"[A3 多分支] 卡片 {current_card_id} 触发多分支串行，共 {len(sequential_targets)} 个后续: "
+                                f"{list(sequential_targets)}"
+                            )
+                        else:
+                            next_card_id = self._find_next_card(
+                                current_card_id,
+                                success,
+                            )
 
                 if next_card_id is not None and not self._is_allowed_card_id(next_card_id):
                     error_msg = f"工作流跳转到非法卡片: {next_card_id}"

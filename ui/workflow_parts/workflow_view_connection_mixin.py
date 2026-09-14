@@ -220,7 +220,11 @@ class WorkflowViewConnectionMixin:
                 raise RuntimeError("；".join(state_errors))
 
             existing_connections = self._registered_connections_for_port(start_card, line_type)
-            allow_multiple = line_type == "random" and start_card.task_type == "随机跳转"
+            # sequential 端口支持一拖多（方案 A3）：保留所有已存在的连线，不替换。
+            # random 端口仅在"随机跳转"卡片上允许多出，保持原行为。
+            allow_multiple = line_type == "sequential" or (
+                line_type == "random" and start_card.task_type == "随机跳转"
+            )
             if allow_multiple:
                 for existing in existing_connections:
                     if existing.end_item is end_card:
@@ -663,14 +667,18 @@ class WorkflowViewConnectionMixin:
             self._updating_sequence = False
 
     def cleanup_all_duplicate_connections(self):
-        """校验重复输出连接；禁止自动选择并删除其中一条。"""
+        """校验重复输出连接；禁止自动选择并删除其中一条。
+
+        sequential 端口允许多出（方案 A3），仅对 success / failure 端口做"一出一"校验。
+        """
         port_connections = {}
         for connection in self.connections:
             if not isinstance(connection, ConnectionLine):
                 raise TypeError("连接列表中存在非 ConnectionLine 对象")
             if connection.start_item is None:
                 raise ValueError("连接缺少起点卡片")
-            if connection.line_type == 'random':
+            if connection.line_type in ('random', 'sequential'):
+                # random 由"随机跳转"卡片自己管，sequential 允许多出
                 continue
             key = (connection.start_item.card_id, connection.line_type)
             port_connections.setdefault(key, []).append(connection)

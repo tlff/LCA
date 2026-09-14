@@ -43,6 +43,18 @@ class GraphEngine:
             for connection in connections
         )
 
+    def next_cards_sequential(self, card_id: Any) -> list[int]:
+        """返回该卡片所有 sequential 后续节点，按声明顺序。
+
+        用于支持"一个输出连接多个后续节点"的多分支场景（方案 A3）。
+        该方法只关心 sequential 类型，success / failure / random 仍走 next_card。
+        """
+        return [
+            int(connection["end_card_id"])
+            for connection in self.connections_from(card_id)
+            if connection["type"] == "sequential"
+        ]
+
     def next_card(
         self,
         card_id: Any,
