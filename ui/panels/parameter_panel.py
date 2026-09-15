@@ -15,6 +15,7 @@ from .window.parameter_panel_window_mixin import ParameterPanelWindowMixin
 from .core.parameter_panel_presentation_mixin import ParameterPanelPresentationMixin
 from .core.parameter_panel_workflow_selector_mixin import ParameterPanelWorkflowSelectorMixin
 from .widget.parameter_panel_widget_registry_mixin import ParameterPanelWidgetRegistryMixin
+from .parameter_panel_variable_condition_mixin import ParameterPanelVariableConditionMixin
 
 
 class ParameterPanel(
@@ -32,6 +33,7 @@ class ParameterPanel(
     ParameterPanelPresentationMixin,
     ParameterPanelWorkflowSelectorMixin,
     ParameterPanelWidgetRegistryMixin,
+    ParameterPanelVariableConditionMixin,
     QWidget,
 ):
     """Parameter panel window."""

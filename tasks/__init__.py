@@ -73,6 +73,8 @@ _PRIMARY_TASK_MODULE_PATHS = {
     "附加条件": "tasks.watchdog_monitor",
     "子工作流": "tasks.sub_workflow_task",
     "自定义脚本": "tasks.script_task",
+    "设置变量": "tasks.set_variable",
+    "变量条件跳转": "tasks.variable_condition",
 }
 
 # 监控类节点不参与顺序执行，只在工作流启动时登记（见 tasks.contract.MonitorModule）。
@@ -127,6 +129,8 @@ _EXPORT_MODULES = {
     "thread_window_limit_task": "tasks.thread_window_limit_task",
     "click_coordinate": "tasks.click_coordinate",
     "task_utils": "tasks.task_utils",
+    "set_variable": "tasks.set_variable",
+    "variable_condition": "tasks.variable_condition",
 }
 
 

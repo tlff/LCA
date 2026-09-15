@@ -47,6 +47,7 @@ class ParameterPanelWidgetRegistryMixin:
             'record_control',
             'replay_control',
             'action_editor',
+            'variable_condition_editor',
         }
 
         if param_type == 'button':

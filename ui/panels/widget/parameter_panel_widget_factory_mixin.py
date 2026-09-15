@@ -517,6 +517,16 @@ class ParameterPanelWidgetFactoryMixin:
             widget.clicked.connect(lambda: self._open_action_editor())
             self._register_widget(name, widget, stores_value=False)
 
+        elif widget_hint == 'variable_condition_editor':
+            cond_count = len(self._parse_variable_conditions(
+                self.current_parameters.get('variable_conditions', '')))
+            widget = ResponsiveButton(
+                f"编辑条件列表 ({cond_count}条)" if cond_count else "编辑条件列表"
+            )
+            widget.setProperty("class", "secondary")
+            widget.clicked.connect(lambda: self._open_variable_condition_editor())
+            self._register_widget(name, widget, stores_value=False)
+
         return widget
 
     def _create_widget_by_param_type(self, name: str, param_def: Dict[str, Any], current_value: Any, label_text: str):
