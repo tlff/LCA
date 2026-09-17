@@ -1,3 +1,0 @@
-# Windows cmd.exe requires CRLF; LF-only .bat files parse as garbage and exit immediately.
-*.bat text eol=crlf
-*.cmd text eol=crlf
