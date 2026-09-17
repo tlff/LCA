@@ -26,6 +26,10 @@ class WindowTaskRunner(
     step_updated = Signal(str, str)
     task_completed = Signal(str, bool)
     runtime_alert = Signal(str, str)
+    card_executing = Signal(int)
+    card_finished = Signal(int, bool)
+    error_occurred = Signal(str, int, int, str)
+    show_warning = Signal(str, str)
 
     def __init__(
         self,
@@ -34,7 +38,6 @@ class WindowTaskRunner(
         task_modules,
         workflow_file_path: Optional[str] = None,
         workflow_slot: int = 0,
-        start_gate_event: Optional[threading.Event] = None,
         bound_windows: Optional[List[Dict[str, Any]]] = None,
         execution_mode: Optional[str] = None,
         runtime_config: Optional[Dict[str, Any]] = None,
@@ -44,7 +47,6 @@ class WindowTaskRunner(
         self.workflow_data = dict(workflow_data) if isinstance(workflow_data, dict) else workflow_data
         self.task_modules = task_modules
         self.workflow_file_path = workflow_file_path
-        self._start_gate_event = start_gate_event
         self._configured_execution_mode = str(execution_mode or "").strip() or None
         self._runtime_config = dict(runtime_config) if isinstance(runtime_config, dict) else {}
         try:
@@ -73,13 +75,41 @@ class WindowTaskRunner(
         self.executor = None
         self.executor_thread = None
 
-        bind_id = str(self.window_info.get("bind_id") or "").strip()
-        try:
-            from utils.window.hwnd_utils import as_hwnd
+        from app_core.control_plane import ensure_bind_id
+        from utils.window.hwnd_utils import as_hwnd
 
+        bind_id = ensure_bind_id(self.window_info)
+        try:
             self.hwnd = as_hwnd(self.window_info.get("hwnd"))
         except Exception:
             self.hwnd = 0
-        self.job_id = bind_id or (str(self.hwnd) if self.hwnd else "unknown")
+        self.job_id = bind_id or "unknown"
         self.window_id = self.job_id
         self.finished.connect(self._on_thread_finished, Qt.ConnectionType.QueuedConnection)
+
+    def apply_hwnd_lease(self, hwnd: int) -> None:
+        from utils.window.hwnd_utils import as_hwnd
+
+        handle = as_hwnd(hwnd)
+        self.hwnd = handle
+        bind_id = str((self.window_info or {}).get("bind_id") or self.job_id or "").strip()
+        if isinstance(self.window_info, dict):
+            self.window_info["hwnd"] = handle
+        executor = getattr(self, "executor", None)
+        collections = [self.bound_windows]
+        if executor is not None:
+            collections.append(getattr(executor, "bound_windows", None))
+            payload = getattr(executor, "_payload", None)
+            if isinstance(payload, dict):
+                payload["target_hwnd"] = handle
+                collections.append(payload.get("bound_windows"))
+            if hasattr(executor, "target_hwnd"):
+                executor.target_hwnd = handle
+        for collection in collections:
+            if not isinstance(collection, list):
+                continue
+            for window_info in collection:
+                if not isinstance(window_info, dict):
+                    continue
+                if bind_id and str(window_info.get("bind_id") or "").strip() == bind_id:
+                    window_info["hwnd"] = handle

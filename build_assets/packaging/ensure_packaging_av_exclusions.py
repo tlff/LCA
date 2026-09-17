@@ -119,8 +119,6 @@ def add_windows_defender_exclusions(paths: list[Path], *, elevate: bool) -> None
 
 
 def verify_plugin_files_readable(plugin_dir: Path, *, label: str) -> list[str]:
-    if not plugin_dir.is_dir():
-        return []
     verified: list[str] = []
     for name, item in iter_plugin_pack_files(plugin_dir):
         try:
@@ -130,6 +128,8 @@ def verify_plugin_files_readable(plugin_dir: Path, *, label: str) -> list[str]:
                 f"{label} 无法读取 {item}（{exc}）。"
                 "文件可能已被 Windows Defender 隔离。"
             ) from exc
+        if not data:
+            raise RuntimeError(f"{label} 中的插件文件为空: {item}")
         if name.lower() == "dm.dll" and len(data) < 1024:
             raise RuntimeError(f"{label} 中的 dm.dll 已损坏或被截断: {item}")
         verified.append(name)
@@ -139,10 +139,7 @@ def verify_plugin_files_readable(plugin_dir: Path, *, label: str) -> list[str]:
 def verify_staged_plugin_runtime(project_root: Path, dist_root: Path) -> None:
     source = project_root / "tools" / "plugin"
     staged = dist_root / "tools" / "plugin"
-    source_names = {name for name, _item in iter_plugin_pack_files(source)}
-    if not source_names:
-        return
-    verify_plugin_files_readable(source, label="源插件目录")
+    source_names = set(verify_plugin_files_readable(source, label="源插件目录"))
     staged_names = set(verify_plugin_files_readable(staged, label="发行插件目录"))
     missing = sorted(source_names - staged_names)
     if missing:

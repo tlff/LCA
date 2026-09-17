@@ -19,7 +19,10 @@ PROJECT_ROOT_FOR_IMPORTS = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT_FOR_IMPORTS) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT_FOR_IMPORTS))
 
-from build_assets.packaging.stage_packaged_runtime_assets import iter_plugin_pack_files
+from build_assets.packaging.stage_packaged_runtime_assets import (
+    PLUGIN_REQUIRED_FILES,
+    iter_plugin_pack_files,
+)
 from services.ocr_runtime_contract import (
     OCR_MODEL_DIRECTORY,
     OCR_MODEL_FILES,
@@ -70,6 +73,9 @@ INCLUDE_MODULES = (
     "utils.plugin.protocol",
     "utils.input.normal_hd_driver",
     "task_workflow.process_worker",
+    "task_workflow.external_component_worker",
+    "task_workflow.external_components",
+    "task_workflow.external_component_trust",
     "win32gui",
     "win32ui",
     "win32con",
@@ -111,10 +117,22 @@ INCLUDE_MODULES = (
     "ui.export_parts.standalone_installer",
 )
 
-# 变量编辑器已移除：禁止再跟进 Monaco / WebEngine / QML / Multimedia。
+# 脚本编辑器用纯 Qt 文本框：禁止再跟进 Monaco / qtpy / WebEngine / QML / Multimedia。
 NOFOLLOW_IMPORTS = (
     "comtypes.test",
     "mouseinfo",
+    "qtpy",
+    "cryptography",
+    "OpenSSL",
+    "urllib3.contrib.pyopenssl",
+    "coloredlogs",
+    "humanfriendly",
+    "pyreadline3",
+    "pyscreeze",
+    "pymsgbox",
+    "pygetwindow",
+    "pytweening",
+    "pyrect",
     "MNN",
     "openvino",
     "paddle",
@@ -138,9 +156,6 @@ NOFOLLOW_IMPORTS = (
     "rapidocr.inference_engine.openvino",
     "rapidocr.inference_engine.tensorrt",
     "rapidocr.inference_engine.mnn",
-    # cryptography 会可选 import bcrypt；Nuitka 跟进后若找不到 _bcrypt.pyd 会直接崩溃。
-    "cryptography",
-    "bcrypt",
     # 本地包已跳过 test_*.py；仍禁 pytest，防止漏网测试拖进依赖
     "pytest",
     "_pytest",
@@ -156,6 +171,12 @@ NOFOLLOW_IMPORTS = (
     "PySide6.QtQuick",
     "PySide6.QtQuickWidgets",
     "PySide6.QtQml",
+    # 界面只用 Widgets/Gui；这些模块会被 qtpy 顺手 import，发行包不需要。
+    "PySide6.QtOpenGL",
+    "PySide6.QtOpenGLWidgets",
+    "PySide6.QtDataVisualization",
+    "PySide6.QtPdf",
+    "PySide6.QtPdfWidgets",
 )
 
 NOINCLUDE_QT_PLUGINS = (
@@ -182,6 +203,8 @@ DATA_FILE_SPECS = (
     ),
     ("AutoHotkey/AutoHotkey64.exe", "AutoHotkey/AutoHotkey64.exe"),
     ("resources/icon.ico", "resources/icon.ico"),
+    ("docs/WORKFLOW_AND_SCRIPTS.md", "docs/WORKFLOW_AND_SCRIPTS.md"),
+    ("docs/AI_ASSISTANT_KNOWLEDGE.md", "docs/AI_ASSISTANT_KNOWLEDGE.md"),
 )
 
 ONNXRUNTIME_GPU_DLL_PATTERNS = (
@@ -315,6 +338,11 @@ def _validate_paths(project_root: Path) -> None:
 
     if not (project_root / "main.py").is_file():
         missing_paths.append("main.py")
+
+    for name in PLUGIN_REQUIRED_FILES:
+        relative = f"tools/plugin/{name}"
+        if not (project_root / relative).is_file():
+            missing_paths.append(relative)
 
     if missing_paths:
         joined = "\n".join(f"  - {path}" for path in missing_paths)
@@ -509,12 +537,35 @@ def _allowed_ocr_model_paths(dist_dir: Path) -> set[Path]:
     }
 
 
+# 业务界面不加载这些 Qt 绑定/插件。qt6opengl.dll 留给 QtGui 渲染，不删。
+_UNUSED_QT_FILE_NAMES = frozenset(
+    {
+        "qtdatavisualization.pyd",
+        "qtopengl.pyd",
+        "qtopenglwidgets.pyd",
+        "qt6datavisualization.dll",
+        "qt6openglwidgets.dll",
+        "qt6pdf.dll",
+        "qpdf.dll",
+        "qdirect2d.dll",
+        "qminimal.dll",
+        "qoffscreen.dll",
+        "qicns.dll",
+        "qtga.dll",
+        "qtiff.dll",
+        "qwbmp.dll",
+    }
+)
+
+
 def _is_unused_qt_editor_path(relative_path: Path) -> bool:
     parts = [part.lower() for part in relative_path.parts]
     name = relative_path.name.lower()
     if "qtmonaco" in parts:
         return True
     if name == "qtwebengineprocess.exe":
+        return True
+    if name in _UNUSED_QT_FILE_NAMES:
         return True
     return "qtwebengine" in name or "qt6webengine" in name
 
@@ -783,6 +834,18 @@ def _prepare_output_dirs(project_root: Path, output_dir: Path) -> None:
     _remove_tree(project_root / "nuitka_dist")
 
 
+def relocate_root_generated_build_files(project_root: Path, output_dir: Path) -> None:
+    """把 Nuitka 写到程序根目录的崩溃报告挪到打包输出目录。"""
+    crash = project_root / "nuitka-crash-report.xml"
+    if not crash.is_file():
+        return
+    output_dir.mkdir(parents=True, exist_ok=True)
+    destination = output_dir / crash.name
+    if destination.exists():
+        destination.unlink()
+    crash.replace(destination)
+
+
 def main() -> int:
     args = _parse_args()
     project_root = Path(args.project_root).resolve()
@@ -808,7 +871,9 @@ def main() -> int:
         )
     except OSError as exc:
         print(f"Failed to start Nuitka build: {exc}", file=sys.stderr)
+        relocate_root_generated_build_files(project_root, output_dir)
         return 1
+    relocate_root_generated_build_files(project_root, output_dir)
 
     if result.returncode != 0:
         return result.returncode

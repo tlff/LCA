@@ -9,7 +9,7 @@ from utils.app_paths import get_app_root
 from typing import Optional, Callable
 from PySide6.QtWidgets import QApplication, QWidget
 from PySide6.QtGui import QColor, QPalette
-from PySide6.QtCore import QObject, Signal, QTimer, Qt
+from PySide6.QtCore import QAbstractNativeEventFilter, QObject, Signal
 import json
 import logging
 import sys
@@ -80,62 +80,85 @@ def detect_system_theme() -> str:
     return 'light'
 
 
-class ThemeWatcher(QObject):
-    """系统主题监视器 - 监听系统主题变化"""
+WM_SETTINGCHANGE = 0x001A
+WINDOWS_GENERIC_MSG = b"windows_generic_MSG"
+IMMERSIVE_COLOR_SET = "ImmersiveColorSet"
 
-    theme_changed = Signal(str)  # 主题变化信号
-    ACTIVE_CHECK_INTERVAL_MS = 5000
-    INACTIVE_CHECK_INTERVAL_MS = 30000
+
+def _native_event_type_bytes(event_type) -> bytes:
+    if isinstance(event_type, bytes):
+        return event_type
+    if isinstance(event_type, (bytearray, memoryview)):
+        return bytes(event_type)
+    try:
+        return bytes(event_type)
+    except (TypeError, ValueError):
+        return b""
+
+
+def is_windows_immersive_color_set_message(event_type, message) -> bool:
+    """是否为 Windows 浅色/深色切换广播（WM_SETTINGCHANGE / ImmersiveColorSet）。"""
+    if _native_event_type_bytes(event_type) != WINDOWS_GENERIC_MSG:
+        return False
+    if message is None:
+        return False
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        msg = wintypes.MSG.from_address(int(message))
+    except (TypeError, ValueError, OSError, OverflowError):
+        return False
+    if int(msg.message) != WM_SETTINGCHANGE:
+        return False
+    if not msg.lParam:
+        return False
+    try:
+        setting_name = ctypes.wstring_at(int(msg.lParam))
+    except (TypeError, ValueError, OSError, OverflowError):
+        return False
+    return setting_name == IMMERSIVE_COLOR_SET
+
+
+class _WindowsThemeNativeEventFilter(QAbstractNativeEventFilter):
+    def __init__(self, on_color_mode_change: Callable[[], None]):
+        super().__init__()
+        self._on_color_mode_change = on_color_mode_change
+
+    def nativeEventFilter(self, eventType, message):
+        if is_windows_immersive_color_set_message(eventType, message):
+            self._on_color_mode_change()
+        return False
+
+
+class ThemeWatcher(QObject):
+    """系统主题监视器：听 Windows 主题广播，前后台都立刻切换。"""
+
+    theme_changed = Signal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.current_system_theme = detect_system_theme()
         self._app = QApplication.instance()
-        self.timer = QTimer(self)
-        self.timer.setSingleShot(True)
-        self.timer.setTimerType(Qt.TimerType.VeryCoarseTimer)
-        self.timer.timeout.connect(self._check_theme)
-        if self._app is not None:
-            self._app.applicationStateChanged.connect(self._on_application_state_changed)
-        self._schedule_next_check(force=True)
+        self._native_filter = None
+        if self._app is not None and sys.platform == "win32":
+            self._native_filter = _WindowsThemeNativeEventFilter(self._on_color_mode_notification)
+            self._app.installNativeEventFilter(self._native_filter)
+            logger.info("已监听系统主题通知")
 
-    def _get_check_interval(self) -> int:
-        if self._app is None:
-            return self.ACTIVE_CHECK_INTERVAL_MS
-
-        app_state = self._app.applicationState()
-        if app_state == Qt.ApplicationState.ApplicationActive:
-            return self.ACTIVE_CHECK_INTERVAL_MS
-        return self.INACTIVE_CHECK_INTERVAL_MS
-
-    def _schedule_next_check(self, force: bool = False):
-        interval = self._get_check_interval()
-        if force or not self.timer.isActive() or self.timer.interval() != interval:
-            self.timer.start(interval)
-
-    def _check_theme(self):
-        """检查系统主题是否变化"""
+    def _on_color_mode_notification(self):
         new_theme = detect_system_theme()
-        if new_theme != self.current_system_theme:
-            logger.info(f"检测到系统主题变化: {self.current_system_theme} -> {new_theme}")
-            self.current_system_theme = new_theme
-            self.theme_changed.emit(new_theme)
-        self._schedule_next_check(force=True)
-
-    def _on_application_state_changed(self, state):
-        if state == Qt.ApplicationState.ApplicationActive:
-            self._check_theme()
+        if new_theme == self.current_system_theme:
             return
-        self._schedule_next_check(force=True)
+        logger.info(f"检测到系统主题变化: {self.current_system_theme} -> {new_theme}")
+        self.current_system_theme = new_theme
+        self.theme_changed.emit(new_theme)
 
     def stop(self):
         """停止监视"""
-        self.timer.stop()
-        if self._app is not None:
-            try:
-                self._app.applicationStateChanged.disconnect(self._on_application_state_changed)
-            except (RuntimeError, TypeError):
-                pass
+        if self._app is not None and self._native_filter is not None:
+            self._app.removeNativeEventFilter(self._native_filter)
+            self._native_filter = None
 
 
 class ThemeManager:

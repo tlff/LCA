@@ -14,6 +14,12 @@ from utils.capture.engine_ids import (
     to_dm_display_mode,
 )
 from utils.plugin.bind_errors import BindOutcome, describe_bind_failure
+from utils.plugin.bind_modes import (
+    PLUGIN_IME_PUBLIC_OPTION,
+    normalize_plugin_keypad,
+    normalize_plugin_mouse,
+    normalize_plugin_public,
+)
 from utils.plugin.runtime import (
     PluginClient,
     PluginTransportError,
@@ -32,10 +38,8 @@ _HOST_CLEANUP_LOCK = threading.Lock()
 _HOST_CLEANUP_PENDING = False
 _HOST_CLEANUP_GENERATION = 0
 _CLIENTS: Dict[int, PluginClient] = {}
-DEFAULT_PLUGIN_DISPLAY = "normal"
-# 非挂钩 display：只用于显式开启 fallback 时的降级尝试顺序，不再影响正常绑定参数
+# 非挂钩 display：桌面试绑提示用，判断 dx/opengl 是否会注入目标进程
 INPUT_BIND_DISPLAYS = ("normal", "gdi", "gdi2")
-SAFE_BIND_MODES = (0, 2)
 
 
 def _client_key(hwnd: Optional[int] = None) -> int:
@@ -186,28 +190,17 @@ def unbind_shared_plugin_windows(hwnd: int = 0) -> bool:
     return unbind_plugin_host(hwnd=int(hwnd or 0))
 
 
-PLUGIN_IME_PUBLIC_OPTION = "dx.public.input.ime"
-
-
 def plugin_bind_extras(config=None) -> tuple[str, bool]:
     """从配置拼出 BindWindowEx 的 public 串与假激活开关，截图/键鼠绑定共用，保证宿主侧缓存键一致。"""
     if config is None:
-        try:
-            from utils.runtime_config import get_runtime_config
+        from utils.runtime_config import get_runtime_config
 
-            config = get_runtime_config()
-        except Exception:
-            config = {}
+        config = get_runtime_config()
     values = dict(config or {})
-    options: list[str] = []
+    options = list(normalize_plugin_public(values.get("plugin_public")))
     if bool(values.get("plugin_text_ime", False)):
         options.append(PLUGIN_IME_PUBLIC_OPTION)
     return "|".join(options), bool(values.get("plugin_fake_active", False))
-
-
-def _is_hook_display(display: object) -> bool:
-    dm_display = to_dm_display_mode(display)
-    return bool(dm_display) and dm_display not in INPUT_BIND_DISPLAYS
 
 
 def restore_plugin_bind_windows(*hwnds: int) -> None:
@@ -256,36 +249,19 @@ def resolve_input_bind_display(preferred: Optional[str] = None) -> str:
 
     大漠一次 BindWindow(Ex) 同时决定图色和键鼠；同一窗口若截图用 dx.graphic.* 而键鼠改成 normal，
     两边绑定键不同，每次截图↔键鼠交替都会解绑重绑（dx 绑定耗时且可能闪窗）。所以这里不再把
-    dx / opengl 显示模式降成 normal，只在没有可用值时回退默认。
+    dx / opengl 显示模式改成 normal。
     """
     dm_display = to_dm_display_mode(preferred)
-    if dm_display:
-        return dm_display
-    raw = normalize_screenshot_engine(preferred)
-    return raw or DEFAULT_PLUGIN_DISPLAY
-
-
-def _bind_modes_to_try(requested: int) -> list[int]:
-    modes: list[int] = []
-    for bind_mode in (int(requested),) + SAFE_BIND_MODES:
-        if bind_mode not in modes:
-            modes.append(bind_mode)
-    return modes
+    if not dm_display:
+        raise ValueError("插件绑定缺少图显")
+    return dm_display
 
 
 def resolve_plugin_display_mode(preferred: Optional[str] = None) -> str:
     chosen = normalize_screenshot_engine(preferred)
-    if is_plugin_screenshot_engine(chosen):
-        return chosen
-    try:
-        from utils.capture.screenshot_helper import get_screenshot_engine
-
-        current = normalize_screenshot_engine(get_screenshot_engine())
-    except Exception:
-        current = ""
-    if is_plugin_screenshot_engine(current):
-        return current
-    return DEFAULT_PLUGIN_DISPLAY
+    if not is_plugin_screenshot_engine(chosen):
+        raise ValueError(f"不是插件截图引擎: {preferred!r}")
+    return chosen
 
 
 class PluginSession:
@@ -314,22 +290,18 @@ class PluginSession:
         return self._client
 
     def _capture_bind_params(self) -> tuple[str, str, int]:
-        try:
-            from utils.input_simulation.mode_utils import is_plugin_input_backend
-            from utils.runtime_config import get_runtime_config
+        from utils.input_simulation.mode_utils import is_plugin_input_backend
+        from utils.plugin.bind_modes import normalize_plugin_bind_mode
+        from utils.runtime_config import get_runtime_config
 
-            cfg = get_runtime_config()
-        except Exception:
-            return "normal", "normal", 0
+        cfg = get_runtime_config()
         if not is_plugin_input_backend(cfg):
-            return "normal", "normal", 0
-        mouse = str(cfg.get("plugin_mouse") or "normal").strip() or "normal"
-        keypad = str(cfg.get("plugin_keypad") or "normal").strip() or "normal"
-        try:
-            mode = int(cfg.get("plugin_bind_mode") or 0)
-        except (TypeError, ValueError):
-            mode = 0
-        return mouse, keypad, mode
+            raise ValueError("插件截图只能在执行模式为插件时绑定，不能改用原生键鼠参数")
+        return (
+            normalize_plugin_mouse(cfg.get("plugin_mouse")),
+            normalize_plugin_keypad(cfg.get("plugin_keypad")),
+            normalize_plugin_bind_mode(cfg.get("plugin_bind_mode")),
+        )
 
     def _try_bind(
         self,
@@ -390,21 +362,6 @@ class PluginSession:
                 )
             return outcome
 
-        if display_target != input_target:
-            try:
-                if _bind(input_target):
-                    self._last_input_hwnd = input_target
-                    return True
-                reason = self.last_bind_failure_text()
-            except Exception as exc:  # noqa: BLE001
-                reason = f"{exc.__class__.__name__}: {exc}"
-            logger.warning(
-                "插件分离绑定失败，改用同一句柄重试: display_hwnd=%s input_hwnd=%s 原因=%s",
-                display_target,
-                input_target,
-                reason,
-            )
-            input_target = display_target
         ok = bool(_bind(input_target))
         if ok:
             self._last_input_hwnd = input_target
@@ -494,27 +451,6 @@ class PluginSession:
             logger.warning("插件绑定异常: %s", err)
         return bool(box.get("ok"))
 
-    @staticmethod
-    def _log_fallback_used(
-        kind: str,
-        requested_display: str,
-        requested_mode: int,
-        used_display: str,
-        used_mode: int,
-        first_failure: str,
-    ) -> None:
-        if requested_display == used_display and int(requested_mode) == int(used_mode):
-            return
-        logger.warning(
-            "插件%s绑定降级：配置 display=%s mode=%s 失败（%s），实际使用 display=%s mode=%s；请核对插件参数",
-            kind,
-            requested_display,
-            requested_mode,
-            first_failure or "原因未知",
-            used_display,
-            used_mode,
-        )
-
     def capture_bgr(
         self,
         hwnd: int,
@@ -522,7 +458,6 @@ class PluginSession:
         input_hwnd: int = 0,
         timeout: float = 4.0,
         client_area_only: bool = True,
-        fallback: bool = False,
         bind_extras: Optional[tuple[str, bool]] = None,
         bind_params: Optional[tuple[str, str, int]] = None,
     ):
@@ -544,52 +479,30 @@ class PluginSession:
         if bind_params is None:
             mouse, keypad, requested_mode = self._capture_bind_params()
         else:
-            mouse = str(bind_params[0] or "normal").strip() or "normal"
-            keypad = str(bind_params[1] or "normal").strip() or "normal"
-            try:
-                requested_mode = int(bind_params[2] or 0)
-            except (TypeError, ValueError):
-                requested_mode = 0
+            from utils.plugin.bind_modes import normalize_plugin_bind_mode
+
+            mouse = normalize_plugin_mouse(bind_params[0])
+            keypad = normalize_plugin_keypad(bind_params[1])
+            requested_mode = normalize_plugin_bind_mode(bind_params[2])
         self._ensure_client()
         preferred_display = to_dm_display_mode(preferred)
-        deadline = time.monotonic() + wait_seconds
-        displays = [preferred_display]
-        if fallback and _is_hook_display(preferred_display):
-            for safe in INPUT_BIND_DISPLAYS:
-                if safe not in displays:
-                    displays.append(safe)
-        first_failure = ""
-        for dm_display in displays:
-            modes = [requested_mode] if not fallback else _bind_modes_to_try(requested_mode)
-            for bind_mode in modes:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    return None
-                outcome = self._bind_with_timeout(
-                    target,
-                    input_target,
-                    dm_display,
-                    mouse,
-                    keypad,
-                    bind_mode,
-                    remaining,
-                    bind_extras=bind_extras,
-                )
-                if outcome is None:
-                    return None
-                if not outcome:
-                    if not first_failure:
-                        first_failure = self.last_bind_failure_text()
-                    continue
-                self._log_fallback_used("截图", preferred_display, requested_mode, dm_display, bind_mode, first_failure)
-                grab_input = int(self._last_input_hwnd or input_target or target)
-                client = self._ensure_client()
-                # 大漠绑定后 GetClientSize + GetScreenData(0,0,w,h) 抓的就是它定义的客户区，
-                # 坐标系也以此为准；不能再按系统标题栏/边框裁一次，否则内容被裁掉、坐标错位。
-                frame = client.capture_bgr(target, dm_display, input_hwnd=grab_input)
-                if frame is not None:
-                    return frame
-        return None
+        outcome = self._bind_with_timeout(
+            target,
+            input_target,
+            preferred_display,
+            mouse,
+            keypad,
+            requested_mode,
+            wait_seconds,
+            bind_extras=bind_extras,
+        )
+        if not outcome:
+            return None
+        grab_input = int(self._last_input_hwnd or input_target or target)
+        client = self._ensure_client()
+        # 大漠绑定后 GetClientSize + GetScreenDataBmp(0,0,w,h) 抓的就是它定义的客户区，
+        # 坐标系也以此为准；不能再按系统标题栏/边框裁一次，否则内容被裁掉、坐标错位。
+        return client.capture_bgr(target, preferred_display, input_hwnd=grab_input)
 
     def ensure_display_bound(
         self,
@@ -597,11 +510,10 @@ class PluginSession:
         display: Optional[str] = None,
         input_hwnd: int = 0,
         timeout: float = 4.0,
-        fallback: bool = False,
         bind_extras: Optional[tuple[str, bool]] = None,
     ) -> bool:
         target = int(hwnd or 0)
-        preferred = str(display or "").strip() or resolve_plugin_display_mode()
+        preferred = str(display or "").strip()
         if target <= 0 or not preferred:
             return False
         try:
@@ -616,37 +528,18 @@ class PluginSession:
             wait_seconds = 4.0
         mouse, keypad, requested_mode = self._capture_bind_params()
         preferred_display = to_dm_display_mode(preferred)
-        deadline = time.monotonic() + wait_seconds
-        displays = [preferred_display]
-        if fallback and _is_hook_display(preferred_display):
-            for safe in INPUT_BIND_DISPLAYS:
-                if safe not in displays:
-                    displays.append(safe)
-        first_failure = ""
-        for dm_display in displays:
-            modes = [requested_mode] if not fallback else _bind_modes_to_try(requested_mode)
-            for bind_mode in modes:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    return False
-                outcome = self._bind_with_timeout(
-                    target,
-                    input_target,
-                    dm_display,
-                    mouse,
-                    keypad,
-                    bind_mode,
-                    remaining,
-                    bind_extras=bind_extras,
-                )
-                if outcome is None:
-                    return False
-                if outcome:
-                    self._log_fallback_used("显示", preferred_display, requested_mode, dm_display, bind_mode, first_failure)
-                    return True
-                if not first_failure:
-                    first_failure = self.last_bind_failure_text()
-        return False
+        return bool(
+            self._bind_with_timeout(
+                target,
+                input_target,
+                preferred_display,
+                mouse,
+                keypad,
+                requested_mode,
+                wait_seconds,
+                bind_extras=bind_extras,
+            )
+        )
 
     def ensure_input_bind(
         self,
@@ -657,46 +550,33 @@ class PluginSession:
         mode: int = 0,
         input_hwnd: Optional[int] = None,
         timeout: float = 8.0,
-        fallback: bool = False,
         bind_extras: Optional[tuple[str, bool]] = None,
     ) -> bool:
-        preferred = str(display or "").strip() or DEFAULT_PLUGIN_DISPLAY
+        from utils.plugin.bind_modes import normalize_plugin_bind_mode
+
+        preferred = str(display or "").strip()
+        if not preferred:
+            return False
         dm_display = resolve_input_bind_display(preferred)
-        wanted_mouse = str(mouse or "dx").strip() or "dx"
-        wanted_keypad = str(keypad or "dx").strip() or "dx"
+        wanted_mouse = normalize_plugin_mouse(mouse)
+        wanted_keypad = normalize_plugin_keypad(keypad)
         try:
             wait_seconds = max(0.05, float(timeout))
         except Exception:
             wait_seconds = 8.0
-        try:
-            requested_mode = int(mode or 0)
-        except (TypeError, ValueError):
-            requested_mode = 0
-        deadline = time.monotonic() + wait_seconds
-        modes = [requested_mode] if not fallback else _bind_modes_to_try(requested_mode)
-        first_failure = ""
-        for bind_mode in modes:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                return False
-            outcome = self._bind_with_timeout(
+        requested_mode = normalize_plugin_bind_mode(mode)
+        return bool(
+            self._bind_with_timeout(
                 int(hwnd or 0),
                 int(input_hwnd or 0),
                 dm_display,
                 wanted_mouse,
                 wanted_keypad,
-                bind_mode,
-                remaining,
+                requested_mode,
+                wait_seconds,
                 bind_extras=bind_extras,
             )
-            if outcome is None:
-                return False
-            if outcome:
-                self._log_fallback_used("键鼠", dm_display, requested_mode, dm_display, bind_mode, first_failure)
-                return True
-            if not first_failure:
-                first_failure = self.last_bind_failure_text()
-        return False
+        )
 
     def last_error(self, hwnd: int = 0) -> int:
         try:

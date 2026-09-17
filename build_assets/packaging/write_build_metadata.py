@@ -8,10 +8,24 @@ import hashlib
 import json
 import subprocess
 import time
+from datetime import date
 from pathlib import Path
+from typing import Optional
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+APP_EDITION = "测试版"
+
+
+def release_date_stamp(today: Optional[date] = None) -> str:
+    """安装包日期标签：月.日，不补零。例如 9.16。"""
+    day = today if today is not None else date.today()
+    return f"{int(day.month)}.{int(day.day)}"
+
+
+def release_setup_base_filename(today: Optional[date] = None, edition: str = APP_EDITION) -> str:
+    """官方安装包文件名（不含 .exe）：LCA_9.16测试版_Setup。"""
+    return f"LCA_{release_date_stamp(today)}{edition}_Setup"
 
 
 def _sha256(path: Path) -> str:
@@ -35,8 +49,18 @@ def _git_commit() -> str:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--dist", required=True)
+    parser.add_argument("--dist")
+    parser.add_argument("--print-release-date", action="store_true")
+    parser.add_argument("--print-setup-basename", action="store_true")
     args = parser.parse_args()
+    if args.print_release_date:
+        print(release_date_stamp())
+        return 0
+    if args.print_setup_basename:
+        print(release_setup_base_filename())
+        return 0
+    if not args.dist:
+        parser.error("必须提供 --dist，或使用 --print-release-date / --print-setup-basename")
     dist = Path(args.dist).resolve()
     files = {}
     for relative in ("main.exe", "DirectML.dll", "onnxruntime/capi/onnxruntime.dll"):
@@ -45,7 +69,7 @@ def main() -> int:
             files[relative] = {"size": path.stat().st_size, "sha256": _sha256(path)}
     metadata = {
         "schema_version": 1,
-        "edition": "测试版",
+        "edition": APP_EDITION,
         "git_commit": _git_commit(),
         "built_at": time.time(),
         "files": files,

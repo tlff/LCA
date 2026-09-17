@@ -42,7 +42,7 @@ CAPTURE_BUTTONS = (
     ("color", "取色", "可连点多个颜色，再点「完成取色」。多点写成 红,绿,蓝|偏移X,偏移Y,红,绿,蓝。"),
     ("coord", "取坐标", "点一下客户区坐标，写入点击/移动/拖拽/滚轮。"),
     ("offset", "选偏移", "从基准点拖到要点的位置，写入固定偏移。找图行会先定位图片中心。"),
-    ("region", "框选区域", "框选识别范围，写入 区域=(横坐标, 纵坐标, 宽, 高)。当前行已是找图/找字/找色等就改那一行，否则插入找图。"),
+    ("region", "框选区域", "框选识别范围，写入 区域.设置；已在检测/找图行上则改该行区域。"),
     ("element", "拾取元素", "鼠标放到控件上，右键确认，写入点元素。"),
 )
 
@@ -617,8 +617,62 @@ def _main_window_of(dialog):
     return dialog.window() if dialog is not None else None
 
 
+def _task_resource_dirs_of(dialog) -> dict:
+    main_window = _main_window_of(dialog)
+    dirs = {}
+    if main_window is not None and hasattr(main_window, "_current_task_resource_dirs"):
+        try:
+            dirs = dict(main_window._current_task_resource_dirs() or {})
+        except Exception:
+            logger.debug("读取当前任务资源目录失败", exc_info=True)
+            dirs = {}
+    if not str(dirs.get("images_dir") or "").strip():
+        dirs["images_dir"] = _images_dir_of(dialog)
+    if not str(dirs.get("sounds_dir") or "").strip():
+        dirs["sounds_dir"] = _sounds_dir_of(dialog)
+    return dirs
+
+
+def _sounds_dir_of(dialog) -> str:
+    main_window = _main_window_of(dialog)
+    try:
+        tab = getattr(main_window, "workflow_tab_widget", None)
+        if tab is not None:
+            task_id = tab.get_current_task_id()
+            manager = getattr(tab, "task_manager", None)
+            task = manager.get_task(task_id) if manager is not None and task_id is not None else None
+            task_sounds = str(getattr(task, "sounds_dir", "") or "").strip() if task is not None else ""
+            if task_sounds:
+                return task_sounds
+    except Exception:
+        logger.debug("读取当前任务 sounds_dir 失败", exc_info=True)
+    if main_window is not None and hasattr(main_window, "_resolve_task_sounds_dir"):
+        try:
+            candidate = str(main_window._resolve_task_sounds_dir() or "").strip()
+            if candidate:
+                return candidate
+        except Exception:
+            logger.debug("读取主窗口 sounds_dir 失败", exc_info=True)
+    from utils.app_paths import get_sounds_dir
+
+    return get_sounds_dir("LCA")
+
+
 def _images_dir_of(dialog) -> str:
     main_window = _main_window_of(dialog)
+    # 优先当前任务标签页的 images_dir，和运行时、通用参数面板保持一致，
+    # 避免采集写到全局目录、运行时却在任务目录找不到图。
+    try:
+        tab = getattr(main_window, "workflow_tab_widget", None)
+        if tab is not None:
+            task_id = tab.get_current_task_id()
+            manager = getattr(tab, "task_manager", None)
+            task = manager.get_task(task_id) if manager is not None and task_id is not None else None
+            task_images = str(getattr(task, "images_dir", "") or "").strip() if task is not None else ""
+            if task_images:
+                return task_images
+    except Exception:
+        logger.debug("读取当前任务 images_dir 失败", exc_info=True)
     candidate = str(getattr(main_window, "images_dir", "") or "").strip()
     if candidate:
         return candidate

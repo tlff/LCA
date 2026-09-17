@@ -38,12 +38,9 @@ class PluginDxInput:
     def _resolved_input_hwnd(self) -> int:
         if self._explicit_input_hwnd > 0:
             return self._explicit_input_hwnd
-        try:
-            from utils.window.window_binding_utils import resolve_plugin_input_hwnd_for_display
+        from utils.window.window_binding_utils import resolve_plugin_input_hwnd_for_display
 
-            return int(resolve_plugin_input_hwnd_for_display(self.hwnd) or self.hwnd)
-        except Exception:
-            return self.hwnd
+        return int(resolve_plugin_input_hwnd_for_display(self.hwnd) or self.hwnd)
 
     def _session(self) -> PluginSession:
         if self._injected_client is None:
@@ -56,14 +53,16 @@ class PluginDxInput:
         from utils.runtime_config import get_runtime_config
 
         cfg = get_runtime_config()
-        mouse = str(cfg.get("plugin_mouse") or "dx").strip() or "dx"
-        keypad = str(cfg.get("plugin_keypad") or "dx").strip() or "dx"
-        try:
-            mode = int(cfg.get("plugin_bind_mode") or 0)
-        except (TypeError, ValueError):
-            mode = 0
-        display = self.display or cfg.get("plugin_input_display") or None
-        display = resolve_plugin_display_mode(display)
+        from utils.plugin.bind_modes import (
+            normalize_plugin_bind_mode,
+            normalize_plugin_keypad,
+            normalize_plugin_mouse,
+        )
+
+        mouse = normalize_plugin_mouse(cfg.get("plugin_mouse"))
+        keypad = normalize_plugin_keypad(cfg.get("plugin_keypad"))
+        mode = normalize_plugin_bind_mode(cfg.get("plugin_bind_mode"))
+        display = resolve_plugin_display_mode(self.display or cfg.get("plugin_input_display"))
         return display, mouse, keypad, mode
 
     def _ready(self) -> bool:
@@ -83,7 +82,6 @@ class PluginDxInput:
             mode=mode,
             input_hwnd=input_hwnd,
             timeout=8.0,
-            fallback=False,
         ):
             logger.error(
                 "插件键鼠绑定失败: display_hwnd=%s input_hwnd=%s %s；"

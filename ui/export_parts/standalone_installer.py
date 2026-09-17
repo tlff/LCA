@@ -3,12 +3,14 @@
 
 from __future__ import annotations
 
+import ctypes
 import logging
 import os
 import shutil
 import subprocess
 import tempfile
 import time
+from ctypes import wintypes
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional, Sequence
@@ -19,13 +21,16 @@ ProgressCallback = Optional[Callable[[int, str], None]]
 
 # 官方下载（不随 LCA 打包，避免增大体积）
 INNO_SETUP_DOWNLOAD_PAGE = "https://jrsoftware.org/isdl.php"
-INNO_SETUP_DOWNLOAD_EXE = (
-    "https://github.com/jrsoftware/issrc/releases/download/is-6_7_3/innosetup-6.7.3.exe"
-)
+# 脚本使用 x64compatible，该指令自 Inno Setup 6.3 起才可用
+MIN_ISCC_VERSION = (6, 3, 0, 0)
 
 
 class MissingInnoSetupError(RuntimeError):
-    """本机未安装 Inno Setup 6（制作安装包的外部依赖）。"""
+    """本机未安装 Inno Setup（制作安装包的外部依赖）。"""
+
+
+class OutdatedInnoSetupError(RuntimeError):
+    """本机 Inno Setup 版本过低或无法确认（需要 6.3 或更高）。"""
 
 
 class MissingChineseLanguageError(RuntimeError):
@@ -38,122 +43,468 @@ INNO_CHINESE_LANG_HELP = (
 )
 
 
+class _VSFixedFileInfo(ctypes.Structure):
+    _fields_ = (
+        ("dwSignature", wintypes.DWORD),
+        ("dwStrucVersion", wintypes.DWORD),
+        ("dwFileVersionMS", wintypes.DWORD),
+        ("dwFileVersionLS", wintypes.DWORD),
+        ("dwProductVersionMS", wintypes.DWORD),
+        ("dwProductVersionLS", wintypes.DWORD),
+        ("dwFileFlagsMask", wintypes.DWORD),
+        ("dwFileFlags", wintypes.DWORD),
+        ("dwFileOS", wintypes.DWORD),
+        ("dwFileType", wintypes.DWORD),
+        ("dwFileSubtype", wintypes.DWORD),
+        ("dwFileDateMS", wintypes.DWORD),
+        ("dwFileDateLS", wintypes.DWORD),
+    )
+
+
+def _is_inno_setup_display_name(display: str) -> bool:
+    return "inno setup" in str(display or "").lower()
+
+
+def _iscc_paths_under(root: Path) -> list[Path]:
+    try:
+        base = Path(root)
+        if not base.is_dir():
+            return []
+        return list(base.glob("Inno Setup */ISCC.exe"))
+    except OSError:
+        return []
+
+
+def _normalize_iscc_version(
+    version: Optional[tuple[int, ...]],
+) -> Optional[tuple[int, int, int, int]]:
+    if version is None:
+        return None
+    try:
+        parts = [int(part) for part in version]
+    except (TypeError, ValueError):
+        return None
+    if not parts or parts[0] <= 0:
+        return None
+    if len(parts) < 4:
+        parts.extend([0] * (4 - len(parts)))
+    return (parts[0], parts[1], parts[2], parts[3])
+
+
+def _parse_version_text(text: str) -> Optional[tuple[int, int, int, int]]:
+    parts: list[int] = []
+    current = ""
+    for ch in str(text or ""):
+        if ch.isdigit():
+            current += ch
+            continue
+        if current:
+            parts.append(int(current))
+            current = ""
+            if ch != ".":
+                break
+        elif parts:
+            break
+    if current:
+        parts.append(int(current))
+    return _normalize_iscc_version(tuple(parts) if parts else None)
+
+
+def _parse_engine_version_output(output: str) -> Optional[tuple[int, int, int, int]]:
+    for raw in str(output or "").splitlines():
+        line = raw.strip()
+        if line.lower().startswith("compiler engine version:"):
+            return _parse_version_text(line)
+    return None
+
+
+def _hi_lo_version(ms: int, ls: int) -> Optional[tuple[int, int, int, int]]:
+    return _normalize_iscc_version(
+        (
+            (int(ms) >> 16) & 0xFFFF,
+            int(ms) & 0xFFFF,
+            (int(ls) >> 16) & 0xFFFF,
+            int(ls) & 0xFFFF,
+        )
+    )
+
+
+def _is_usable_iscc_version(version: Optional[tuple[int, ...]]) -> bool:
+    normalized = _normalize_iscc_version(version)
+    return normalized is not None and normalized >= MIN_ISCC_VERSION
+
+
+def _format_iscc_version(version: Optional[tuple[int, ...]]) -> str:
+    normalized = _normalize_iscc_version(version)
+    if normalized is None:
+        return "无法确认"
+    return ".".join(str(part) for part in normalized)
+
+
+def _read_iscc_pe_version(path: Path) -> Optional[tuple[int, int, int, int]]:
+    if os.name != "nt":
+        return None
+    try:
+        candidate = Path(path)
+        if not candidate.is_file():
+            return None
+    except OSError:
+        return None
+    try:
+        version_dll = ctypes.WinDLL("version", use_last_error=True)
+        get_size = version_dll.GetFileVersionInfoSizeW
+        get_size.argtypes = (wintypes.LPCWSTR, ctypes.POINTER(wintypes.DWORD))
+        get_size.restype = wintypes.DWORD
+        get_info = version_dll.GetFileVersionInfoW
+        get_info.argtypes = (
+            wintypes.LPCWSTR,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.LPVOID,
+        )
+        get_info.restype = wintypes.BOOL
+        query = version_dll.VerQueryValueW
+        query.argtypes = (
+            wintypes.LPCVOID,
+            wintypes.LPCWSTR,
+            ctypes.POINTER(wintypes.LPVOID),
+            ctypes.POINTER(wintypes.UINT),
+        )
+        query.restype = wintypes.BOOL
+
+        ignored = wintypes.DWORD()
+        size = get_size(str(candidate), ctypes.byref(ignored))
+        if not size:
+            return None
+        buffer = ctypes.create_string_buffer(size)
+        if not get_info(str(candidate), 0, size, buffer):
+            return None
+        pointer = wintypes.LPVOID()
+        length = wintypes.UINT()
+        if not query(buffer, "\\", ctypes.byref(pointer), ctypes.byref(length)):
+            return None
+        if length.value < ctypes.sizeof(_VSFixedFileInfo):
+            return None
+        info = ctypes.cast(pointer, ctypes.POINTER(_VSFixedFileInfo)).contents
+        if info.dwSignature != 0xFEEF04BD:
+            return None
+        file_version = _hi_lo_version(info.dwFileVersionMS, info.dwFileVersionLS)
+        if file_version is not None:
+            return file_version
+        return _hi_lo_version(info.dwProductVersionMS, info.dwProductVersionLS)
+    except (AttributeError, OSError, ValueError):
+        return None
+
+
+def _install_dir_of(path: Path) -> Optional[Path]:
+    try:
+        resolved = Path(path).resolve()
+        return resolved.parent if resolved.is_file() else resolved
+    except OSError:
+        return None
+
+
+def _same_install_dir(iscc: Path, location: str) -> bool:
+    install_dir = _install_dir_of(iscc)
+    other = _expand_iscc_path(location.strip().strip('"'))
+    if install_dir is None or other is None:
+        return False
+    other_dir = _install_dir_of(other)
+    if other_dir is None:
+        return False
+    return os.path.normcase(str(install_dir)) == os.path.normcase(str(other_dir))
+
+
+def _iter_inno_uninstall_entries():
+    if os.name != "nt":
+        return
+    try:
+        import winreg
+    except ImportError:
+        return
+    roots = (
+        (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"),
+        (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall"),
+        (winreg.HKEY_CURRENT_USER, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"),
+    )
+    for hive, subkey in roots:
+        try:
+            with winreg.OpenKey(hive, subkey) as key:
+                count = winreg.QueryInfoKey(key)[0]
+                for i in range(count):
+                    try:
+                        name = winreg.EnumKey(key, i)
+                        with winreg.OpenKey(key, name) as item:
+                            try:
+                                display = str(winreg.QueryValueEx(item, "DisplayName")[0])
+                            except OSError:
+                                continue
+                            if not _is_inno_setup_display_name(display):
+                                continue
+
+                            def _value(value_name: str) -> str:
+                                try:
+                                    return str(winreg.QueryValueEx(item, value_name)[0] or "")
+                                except OSError:
+                                    return ""
+
+                            yield {
+                                "display": display,
+                                "version": _value("DisplayVersion"),
+                                "location": _value("InstallLocation"),
+                                "uninstall": _value("UninstallString"),
+                            }
+                    except OSError:
+                        continue
+        except OSError:
+            continue
+
+
+def _read_iscc_registry_version(path: Path) -> Optional[tuple[int, int, int, int]]:
+    try:
+        candidate = Path(path)
+    except TypeError:
+        return None
+    for entry in _iter_inno_uninstall_entries():
+        location = str(entry.get("location") or "")
+        uninstall = str(entry.get("uninstall") or "")
+        if location and _same_install_dir(candidate, location):
+            parsed = _parse_version_text(str(entry.get("version") or ""))
+            if parsed is not None:
+                return parsed
+        if uninstall and _same_install_dir(candidate, uninstall):
+            parsed = _parse_version_text(str(entry.get("version") or ""))
+            if parsed is not None:
+                return parsed
+    return None
+
+
+def _read_iscc_engine_version(path: Path) -> Optional[tuple[int, int, int, int]]:
+    try:
+        candidate = Path(path)
+        if not candidate.is_file():
+            return None
+    except OSError:
+        return None
+    script = None
+    try:
+        handle, script = tempfile.mkstemp(prefix="lca_iscc_ver_", suffix=".iss")
+        os.close(handle)
+        Path(script).write_text("#error LCA_ISCC_PROBE\n", encoding="utf-8")
+        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+        completed = subprocess.run(
+            [str(candidate), script],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=20,
+            creationflags=flags,
+        )
+        output = f"{completed.stdout or ''}\n{completed.stderr or ''}"
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        return None
+    finally:
+        if script:
+            try:
+                os.remove(script)
+            except OSError:
+                pass
+    return _parse_engine_version_output(output)
+
+
+def _read_iscc_file_version(path: Path) -> Optional[tuple[int, int, int, int]]:
+    for reader in (
+        _read_iscc_pe_version,
+        _read_iscc_registry_version,
+        _read_iscc_engine_version,
+    ):
+        version = _normalize_iscc_version(reader(path))
+        if version is not None:
+            return version
+    return None
+
+
+def _expand_iscc_path(path: Path | str | None) -> Optional[Path]:
+    if not path:
+        return None
+    text = str(path).strip()
+    if not text:
+        return None
+    return Path(os.path.expandvars(text)).expanduser()
+
+
+def _configured_iscc_path() -> Optional[Path]:
+    raw = str(os.environ.get("INNO_SETUP_ISCC") or os.environ.get("ISCC") or "").strip()
+    return _expand_iscc_path(raw)
+
+
+def _program_files_roots() -> list[Path]:
+    roots: list[Path] = []
+    seen: set[str] = set()
+
+    def add(path: Path | str | None) -> None:
+        candidate = _expand_iscc_path(path)
+        if candidate is None:
+            return
+        key = str(candidate).lower()
+        if key in seen:
+            return
+        seen.add(key)
+        roots.append(candidate)
+
+    add(os.environ.get("ProgramFiles"))
+    add(os.environ.get("ProgramFiles(x86)"))
+    add(r"C:\Program Files")
+    add(r"C:\Program Files (x86)")
+    return roots
+
+
+def _fixed_drive_roots() -> list[Path]:
+    # 仅探测固定磁盘，避免 Path("A:/").exists() 在空光驱/软驱上卡住
+    if os.name != "nt":
+        return []
+    try:
+        get_logical_drives = ctypes.windll.kernel32.GetLogicalDrives
+        get_drive_type_w = ctypes.windll.kernel32.GetDriveTypeW
+        drive_fixed = 3
+        mask = int(get_logical_drives())
+        roots: list[Path] = []
+        for index in range(26):
+            if not (mask & (1 << index)):
+                continue
+            root = f"{chr(ord('A') + index)}:\\"
+            if int(get_drive_type_w(root)) != drive_fixed:
+                continue
+            roots.append(Path(root))
+        return roots
+    except Exception:
+        logger.debug("枚举固定磁盘查找 ISCC 失败", exc_info=True)
+        return []
+
+
+def _registry_iscc_candidates() -> list[Path]:
+    found: list[Path] = []
+    try:
+        for entry in _iter_inno_uninstall_entries():
+            location = str(entry.get("location") or "")
+            if location:
+                found.append(Path(location) / "ISCC.exe")
+            uninstall = str(entry.get("uninstall") or "")
+            if uninstall:
+                unins = Path(uninstall.strip().strip('"'))
+                found.append(unins.parent / "ISCC.exe")
+    except Exception:
+        logger.debug("查询 Inno Setup 注册表失败", exc_info=True)
+    return found
+
+
 def _iscc_candidates() -> list[Path]:
     """收集可能的 ISCC 路径（环境变量 / 常见目录 / 各盘根目录 / 注册表）。"""
     found: list[Path] = []
     seen: set[str] = set()
 
     def add(path: Path | str | None) -> None:
-        if not path:
+        candidate = _expand_iscc_path(path)
+        if candidate is None:
             return
-        candidate = Path(os.path.expandvars(str(path))).expanduser()
         key = str(candidate).lower()
         if key in seen:
             return
         seen.add(key)
         found.append(candidate)
 
-    env = str(os.environ.get("INNO_SETUP_ISCC") or os.environ.get("ISCC") or "").strip()
-    add(env)
+    add(_configured_iscc_path())
 
-    for candidate in (
-        Path(r"C:\Program Files (x86)\Inno Setup 6\ISCC.exe"),
-        Path(r"C:\Program Files\Inno Setup 6\ISCC.exe"),
-        Path(r"D:\Inno Setup 6\ISCC.exe"),
-        Path(r"E:\Inno Setup 6\ISCC.exe"),
-    ):
+    for root in _program_files_roots():
+        for candidate in _iscc_paths_under(root):
+            add(candidate)
+
+    for root in _fixed_drive_roots():
+        for candidate in _iscc_paths_under(root):
+            add(candidate)
+
+    add(shutil.which("ISCC") or shutil.which("ISCC.exe"))
+
+    for candidate in _registry_iscc_candidates():
         add(candidate)
-
-    # 仅探测固定磁盘，避免 Path("A:/").exists() 在空光驱/软驱上卡住
-    if os.name == "nt":
-        try:
-            import ctypes
-
-            GetLogicalDrives = ctypes.windll.kernel32.GetLogicalDrives
-            GetDriveTypeW = ctypes.windll.kernel32.GetDriveTypeW
-            DRIVE_FIXED = 3
-            mask = int(GetLogicalDrives())
-            for index in range(26):
-                if not (mask & (1 << index)):
-                    continue
-                root = f"{chr(ord('A') + index)}:\\"
-                if int(GetDriveTypeW(root)) != DRIVE_FIXED:
-                    continue
-                add(Path(root) / "Inno Setup 6" / "ISCC.exe")
-        except Exception:
-            logger.debug("枚举固定磁盘查找 ISCC 失败", exc_info=True)
-
-    which = shutil.which("ISCC") or shutil.which("ISCC.exe")
-    add(which)
-
-    if os.name == "nt":
-        try:
-            import winreg
-
-            roots = (
-                (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"),
-                (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall"),
-                (winreg.HKEY_CURRENT_USER, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"),
-            )
-            for hive, subkey in roots:
-                try:
-                    with winreg.OpenKey(hive, subkey) as key:
-                        count = winreg.QueryInfoKey(key)[0]
-                        for i in range(count):
-                            try:
-                                name = winreg.EnumKey(key, i)
-                                with winreg.OpenKey(key, name) as item:
-                                    display = str(winreg.QueryValueEx(item, "DisplayName")[0])
-                                    if "Inno Setup 6" not in display:
-                                        continue
-                                    location = ""
-                                    try:
-                                        location = str(winreg.QueryValueEx(item, "InstallLocation")[0] or "")
-                                    except OSError:
-                                        location = ""
-                                    if location:
-                                        add(Path(location) / "ISCC.exe")
-                                    try:
-                                        uninstall = str(winreg.QueryValueEx(item, "UninstallString")[0] or "")
-                                    except OSError:
-                                        uninstall = ""
-                                    if uninstall:
-                                        # 形如 "D:\Inno Setup 6\unins000.exe"
-                                        unins = Path(uninstall.strip().strip('"'))
-                                        add(unins.parent / "ISCC.exe")
-                            except OSError:
-                                continue
-                except OSError:
-                    continue
-        except Exception:
-            logger.debug("查询 Inno Setup 注册表失败", exc_info=True)
 
     return found
 
 
-def find_iscc() -> Optional[Path]:
-    """仅查找本机已安装的 Inno Setup 6；不捆绑、不内嵌编译器。"""
-    for candidate in _iscc_candidates():
-        if candidate.is_file():
-            return candidate
-    return None
+def _is_existing_file(path: Path) -> bool:
+    try:
+        return Path(path).is_file()
+    except OSError:
+        return False
 
 
-def require_iscc() -> Path:
-    iscc = find_iscc()
-    if iscc is not None:
-        return iscc
-    raise MissingInnoSetupError(
-        "未检测到 Inno Setup 6，无法制作安装包。\n\n"
-        "请先安装 Inno Setup 6，安装完成后再试。\n"
+def _missing_iscc_message() -> str:
+    return (
+        "未检测到 Inno Setup，无法制作安装包。\n\n"
+        "请安装 Inno Setup 6.3 或更高版本后再试。\n"
         "（Inno Setup 不随本程序打包，以免增大体积。）\n\n"
         f"下载页面：\n{INNO_SETUP_DOWNLOAD_PAGE}\n\n"
-        f"安装包直链：\n{INNO_SETUP_DOWNLOAD_EXE}\n\n"
         "也可设置环境变量 INNO_SETUP_ISCC 指向 ISCC.exe。\n"
         "常见路径示例：\n"
         r"C:\Program Files (x86)\Inno Setup 6\ISCC.exe" + "\n"
-        r"D:\Inno Setup 6\ISCC.exe"
+        r"C:\Program Files\Inno Setup 7\ISCC.exe"
     )
+
+
+def _outdated_iscc_message(version: Optional[tuple[int, ...]]) -> str:
+    current = _format_iscc_version(version)
+    reason = "无法确认" if version is None else "过旧"
+    return (
+        f"本机 Inno Setup 版本{reason}，无法制作安装包。\n\n"
+        f"当前版本：{current}\n"
+        "需要 6.3 或更高版本。\n\n"
+        f"下载页面：\n{INNO_SETUP_DOWNLOAD_PAGE}"
+    )
+
+
+def _require_specific_iscc(path: Path) -> Path:
+    if not _is_existing_file(path):
+        raise MissingInnoSetupError(_missing_iscc_message())
+    version = _read_iscc_file_version(path)
+    if not _is_usable_iscc_version(version):
+        raise OutdatedInnoSetupError(_outdated_iscc_message(version))
+    return path
+
+
+def require_iscc() -> Path:
+    configured = _configured_iscc_path()
+    if configured is not None:
+        return _require_specific_iscc(configured)
+
+    existing = [candidate for candidate in _iscc_candidates() if _is_existing_file(candidate)]
+    best_path: Optional[Path] = None
+    best_version: Optional[tuple[int, int, int, int]] = None
+    readable_old: list[tuple[int, int, int, int]] = []
+    for candidate in existing:
+        version = _normalize_iscc_version(_read_iscc_file_version(candidate))
+        if version is None:
+            continue
+        if version >= MIN_ISCC_VERSION:
+            if best_version is None or version > best_version:
+                best_version = version
+                best_path = candidate
+        else:
+            readable_old.append(version)
+    if best_path is not None:
+        return best_path
+    if not existing:
+        raise MissingInnoSetupError(_missing_iscc_message())
+    highest_old = max(readable_old) if readable_old else None
+    raise OutdatedInnoSetupError(_outdated_iscc_message(highest_old))
+
+
+def find_iscc() -> Optional[Path]:
+    """仅查找本机已安装且版本不低于 6.3 的 Inno Setup；不捆绑、不内嵌编译器。"""
+    try:
+        return require_iscc()
+    except (MissingInnoSetupError, OutdatedInnoSetupError):
+        return None
 
 
 def chinese_simplified_isl_path(iscc: Path | None = None) -> Optional[Path]:
@@ -395,7 +746,7 @@ def build_standalone_installer(
     """
     编译安装包，返回 Setup.exe 路径。
     payload_dir: 已放好 设计名.exe / package.lcap / 依赖 DLL 的目录。
-    依赖本机已安装的 Inno Setup 6，不自带编译器。
+    依赖本机已安装的 Inno Setup 6.3 或更高版本，不自带编译器。
     """
     iscc = require_iscc()
     require_chinese_simplified_isl(iscc)

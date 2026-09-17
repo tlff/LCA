@@ -141,6 +141,7 @@ def build_worker_process_env(
     base_env: Optional[Mapping[str, str]] = None,
     *,
     project_root: Optional[str] = None,
+    include_plugin_attach: bool = True,
 ) -> Dict[str, str]:
     resolved_project_root = resolve_project_root(project_root)
     env = dict(base_env) if base_env is not None else os.environ.copy()
@@ -157,12 +158,13 @@ def build_worker_process_env(
         env["VIRTUAL_ENV"] = venv_root
         env["PATH"] = _prepend_path_once(env.get("PATH"), scripts_dir)
 
-    try:
-        from utils.plugin.runtime import plugin_attach_env
+    if include_plugin_attach:
+        try:
+            from utils.plugin.runtime import plugin_attach_env
 
-        env.update(plugin_attach_env())
-    except Exception:
-        pass
+            env.update(plugin_attach_env())
+        except Exception:
+            pass
     return env
 
 

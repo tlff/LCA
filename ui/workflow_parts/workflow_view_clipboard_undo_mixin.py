@@ -106,6 +106,8 @@ class WorkflowViewClipboardUndoMixin:
             self.update_card_sequence_display()
             if has_start_card:
                 self._refresh_thread_start_custom_names()
+            if not self._loading_workflow:
+                self.reroute_connections()
             self.viewport().update()
 
         return deleted_count
@@ -578,6 +580,7 @@ class WorkflowViewClipboardUndoMixin:
         'modify_connection': {'old_connection_data', 'new_connection_data'},
         'add_card': {'card_data'},
         'change_card_ids': {'id_mapping'},
+        'replace_workflow': {'workflow_data'},
     }
 
     def _save_undo_state(self, operation_type: str, operation_data: Dict[str, Any]):
@@ -807,6 +810,8 @@ class WorkflowViewClipboardUndoMixin:
                 self._undo_add_card(operation_data)
             elif operation_type == 'change_card_ids':
                 self._undo_change_card_ids(operation_data)
+            elif operation_type == 'replace_workflow':
+                self._undo_replace_workflow(operation_data)
             else:
                 operation_logger.error("[撤回] 未知操作类型: %s", operation_type)
                 debug_print(f"  [UNDO] Unknown operation type: {operation_type}")
@@ -1131,3 +1136,9 @@ class WorkflowViewClipboardUndoMixin:
         if len(reverse_mapping) != len(id_mapping):
             raise ValueError("撤回卡片 ID 映射存在目标冲突")
         self._apply_card_id_mapping(reverse_mapping)
+
+    def _undo_replace_workflow(self, operation_data: Dict[str, Any]):
+        workflow_data = operation_data.get("workflow_data")
+        if not isinstance(workflow_data, dict):
+            raise TypeError("撤回工作流数据必须是字典")
+        self.load_workflow(workflow_data)

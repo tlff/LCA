@@ -144,6 +144,11 @@ class RuntimeStore:
         self._card_results: Dict[int, Dict[str, Any]] = {}
         self._counters: Dict[str, int] = {}
         self._current_card_id: Optional[int] = None
+        # 跨线程记录“最近一次发布”的整体快照与各 kind 快照，供 copy_for_debug
+        # 把它们播种到调试线程名下：单调递增的发布序号用来判定谁最新。
+        self._publish_seq: int = 0
+        self._recent_payload: Optional[Dict[str, Any]] = None
+        self._recent_by_kind: Dict[str, Dict[str, Any]] = {}
 
     def reset(self) -> None:
         with self._lock:
@@ -152,6 +157,9 @@ class RuntimeStore:
             self._last_by_kind.clear()
             self._card_results.clear()
             self._current_card_id = None
+            self._publish_seq = 0
+            self._recent_payload = None
+            self._recent_by_kind.clear()
 
     def bind_counters(self, counters: Optional[Dict[str, int]]) -> None:
         self._counters = counters if isinstance(counters, dict) else {}
@@ -163,10 +171,7 @@ class RuntimeStore:
             self._current_card_id = None
 
     def get_var(self, name: Any, default: Any = None) -> Any:
-        try:
-            key = normalize_var_name(name)
-        except ValueError:
-            return default
+        key = normalize_var_name(name)
         with self._lock:
             return self._vars.get(key, default)
 
@@ -177,12 +182,26 @@ class RuntimeStore:
             self._vars[key] = stored
         return stored
 
+    def has_var(self, name: Any) -> bool:
+        key = normalize_var_name(name)
+        with self._lock:
+            return key in self._vars
+
+    def delete_var(self, name: Any) -> bool:
+        key = normalize_var_name(name)
+        # Use a sentinel so deleting a variable whose value is actually ``None``
+        # still reports success.  ``pop(key, None)`` used to conflate a missing
+        # key with an existing key storing None.
+        missing = object()
+        with self._lock:
+            return self._vars.pop(key, missing) is not missing
+
     def inc_var(self, name: Any, step: Any = 1) -> Any:
         key = normalize_var_name(name)
         try:
             delta = float(step)
         except (TypeError, ValueError):
-            delta = 1.0
+            raise ValueError("步长必须是数字") from None
         with self._lock:
             current = self._vars.get(key, 0)
             try:
@@ -198,6 +217,36 @@ class RuntimeStore:
         with self._lock:
             return dict(self._vars)
 
+    def copy_for_debug(self) -> "RuntimeStore":
+        """返回一个用于编辑器调试运行的存储副本。
+
+        深拷贝卡片结果表、``last`` 感知快照与变量，让调试脚本能读取上次真实
+        运行的 ``卡片[...]``、``变量.全局获取`` 等数据；而计数器保持解绑、当前卡片
+        置空、所有写入只落在副本里，不会污染正在运行的正式存储。
+        """
+        import copy as _copy
+
+        clone = RuntimeStore()
+        current = threading.get_ident()
+        with self._lock:
+            clone._vars = _copy.deepcopy(self._vars)
+            clone._card_results = _copy.deepcopy(self._card_results)
+            clone._last_by_thread = _copy.deepcopy(self._last_by_thread)
+            clone._last_by_kind = _copy.deepcopy(self._last_by_kind)
+            recent_payload = _copy.deepcopy(self._recent_payload)
+            recent_by_kind = _copy.deepcopy(self._recent_by_kind)
+            clone._publish_seq = self._publish_seq
+            clone._recent_payload = recent_payload
+            clone._recent_by_kind = _copy.deepcopy(self._recent_by_kind)
+        # 正式运行发布 last 是按发布线程隔离的；调试脚本却在新线程里执行，
+        # 若不播种，其 上次/文字（走 last）会读不到最后一次真实运行的结果。
+        # 这里把“跨线程最近发布”的整体与各 kind 快照登记到当前（调试）线程名下。
+        if recent_payload is not None:
+            clone._last_by_thread[current] = recent_payload
+        if recent_by_kind:
+            clone._last_by_kind[current] = dict(recent_by_kind)
+        return clone
+
     def publish(self, card_id: Any, perception: Optional[Dict[str, Any]] = None, **fields: Any) -> Dict[str, Any]:
         merged = dict(perception or {})
         merged.update(fields)
@@ -205,9 +254,13 @@ class RuntimeStore:
         thread_id = threading.get_ident()
         with self._lock:
             self._last_by_thread[thread_id] = payload
+            self._publish_seq += 1
+            # 发布在锁内串行，最后一次发布即为全局最近的整体/各 kind 快照。
+            self._recent_payload = payload
             kind = str(payload.get("kind") or "").strip()
             if kind in KIND_ALIASES:
                 self._last_by_kind.setdefault(thread_id, {})[kind] = payload
+                self._recent_by_kind[kind] = payload
             try:
                 numeric_card_id = int(card_id)
             except (TypeError, ValueError):

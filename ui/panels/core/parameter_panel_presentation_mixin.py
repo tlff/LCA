@@ -7,7 +7,7 @@ class ParameterPanelPresentationMixin:
     def show_parameters(self, card_id: int, task_type: str, param_definitions: Dict[str, Dict[str, Any]],
                        current_parameters: Dict[str, Any], workflow_cards_info: Dict[int, tuple[str, int]] = None,
                        images_dir: str = None, target_window_hwnd: int = None, task_module=None, main_window=None,
-                       custom_name: str = None):
+                       custom_name: str = None, sounds_dir: str = None):
         logger.info(f"显示参数面板: 卡片={card_id}, 任务={task_type}")
         if task_type == "自定义脚本":
             logger.warning("自定义脚本使用独立编辑器，已忽略参数面板请求")
@@ -19,7 +19,13 @@ class ParameterPanelPresentationMixin:
         self._loading_parameter_panel = True
         try:
             self._load_parameter_panel_values(card_id, param_definitions, current_parameters)
-            self._store_parameter_panel_context(param_definitions, workflow_cards_info, images_dir, target_window_hwnd)
+            self._store_parameter_panel_context(
+                param_definitions,
+                workflow_cards_info,
+                images_dir,
+                target_window_hwnd,
+                sounds_dir,
+            )
             self._restore_dynamic_select_options()
             self._log_parameter_panel_state()
             self._show_parameter_panel_window(card_id, task_type, custom_name)
@@ -30,6 +36,7 @@ class ParameterPanelPresentationMixin:
 
     def _prepare_parameter_panel_request(self, card_id: int, task_type: str, custom_name: Optional[str], task_module, main_window) -> bool:
         self._favorites_mode = False
+        self._restore_standard_footer_buttons()
         self._set_footer_buttons_visible(True)
 
         if not isinstance(card_id, int) or card_id < 0:
@@ -117,10 +124,18 @@ class ParameterPanelPresentationMixin:
             else:
                 self.current_parameters[param_name] = param_def.get('default', '')
 
-    def _store_parameter_panel_context(self, param_definitions: Dict[str, Dict[str, Any]], workflow_cards_info, images_dir: Optional[str], target_window_hwnd: Optional[int]) -> None:
+    def _store_parameter_panel_context(
+        self,
+        param_definitions: Dict[str, Dict[str, Any]],
+        workflow_cards_info,
+        images_dir: Optional[str],
+        target_window_hwnd: Optional[int],
+        sounds_dir: Optional[str] = None,
+    ) -> None:
         self.param_definitions = param_definitions
         self.workflow_cards_info = workflow_cards_info or {}
         self.images_dir = images_dir
+        self.sounds_dir = sounds_dir
         self.target_window_hwnd = target_window_hwnd
 
     def _restore_dynamic_select_options(self) -> None:

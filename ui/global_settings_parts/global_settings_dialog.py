@@ -100,6 +100,7 @@ class GlobalSettingsDialog(GlobalSettingsDialogTabsMixin, GlobalSettingsDialogVi
         self._create_hotkey_tab()
         self._create_other_tab()
         self._create_about_tab()
+        self._validate_required_controls()
         # --- Dialog Buttons ---
         button_box = QDialogButtonBox()
         button_layout = QHBoxLayout()
@@ -140,7 +141,6 @@ class GlobalSettingsDialog(GlobalSettingsDialogTabsMixin, GlobalSettingsDialogVi
         # 在初始化时检查窗口状态
         self._check_and_cleanup_closed_windows()
         self._update_execution_mode_visibility()
-        self._refresh_plugin_probe_feedback(refresh_combo=False)
         # 不在初始化后 adjustSize / 二次 recenter：首帧改几何会闪黑边
         # 居中由 MainWindow._present_global_settings_dialog 在 show 前完成
 

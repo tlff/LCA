@@ -21,7 +21,11 @@ from typing import Any, List, Optional, Sequence, Tuple
 
 from utils.app_paths import get_app_root
 from utils.input_simulation.mode_utils import normalize_ib_driver_name
-from utils.input.input_timing import DEFAULT_CLICK_HOLD_SECONDS, DEFAULT_KEY_HOLD_SECONDS
+from utils.input.input_timing import (
+    DEFAULT_CLICK_HOLD_SECONDS,
+    DEFAULT_KEY_HOLD_SECONDS,
+    read_system_keyboard_repeat,
+)
 from utils.input.logitech_mouse_move import plan_logitech_absolute_move
 from utils.input.logitech_runtime import detect_logitech_runtime, lgs_pointer_acceleration_enabled
 from utils.precise_sleep import precise_sleep as _shared_precise_sleep
@@ -1389,38 +1393,6 @@ class IbInputSimulatorDriver:
                 self._sendinput_pressed_keys.discard(normalized_key)
         return ok
 
-    def _sendinput_modified_key_press(
-        self,
-        key: Any,
-        held_keys: Sequence[Any],
-        duration: float,
-    ) -> bool:
-        if not self._should_use_sendinput_modifier_support():
-            return False
-
-        clean_held_keys = [str(item or "").strip() for item in held_keys or [] if str(item or "").strip()]
-        if not clean_held_keys or not all(self._is_modifier_key_name(item) for item in clean_held_keys):
-            return False
-
-        pressed_now: List[str] = []
-        try:
-            for held_key in clean_held_keys:
-                if held_key not in self._sendinput_pressed_keys:
-                    if not self._sendinput_key_event(held_key, True):
-                        return False
-                    self._sendinput_pressed_keys.add(held_key)
-                    pressed_now.append(held_key)
-
-            if not self._sendinput_key_event(key, True):
-                return False
-            if duration > 0:
-                _shared_precise_sleep(float(duration))
-            if not self._sendinput_key_event(key, False):
-                return False
-            return True
-        except Exception:
-            return False
-
     def _serialize_points(self, points: Sequence[Sequence[Any]]) -> str:
         serialized: List[str] = []
         for item in points:
@@ -1659,19 +1631,36 @@ class IbInputSimulatorDriver:
 
     def press_key(self, key: str, duration: float = _DEFAULT_KEY_HOLD_SECONDS) -> bool:
         normalized_key = self._normalize_key(key)
-        try:
-            hold_duration = max(0.0, float(duration))
-        except Exception:
-            hold_duration = _DEFAULT_KEY_HOLD_SECONDS
+        hold_duration = max(0.0, float(duration))
+        delay, interval = read_system_keyboard_repeat()
 
         with self._key_lock:
+            # 罗技 HID 按住不会像真键盘那样连发，输入法只会收到一个字母。
+            # 按系统重复延迟/速率，在同一条驱动通道上补 make/break。
+            self._request("key_down", normalized_key)
+            self._pressed_keys.add(normalized_key)
+            released = False
             try:
-                # 由 worker 内部原子执行 down->hold->up，减少 IPC 往返抖动对按压时长的影响。
-                self._request("press_key", normalized_key, hold_duration)
+                if hold_duration > 0:
+                    deadline = time.monotonic() + hold_duration
+                    _shared_precise_sleep(min(delay, hold_duration))
+                    while time.monotonic() < deadline:
+                        self._request("key_up", normalized_key)
+                        self._request("key_down", normalized_key)
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            break
+                        _shared_precise_sleep(min(interval, remaining))
+                self._request("key_up", normalized_key)
+                released = True
+            finally:
+                if not released:
+                    try:
+                        self._request("key_up", normalized_key)
+                    except Exception:
+                        logger.exception("按键松开失败: %s", normalized_key)
                 self._pressed_keys.discard(normalized_key)
-                return True
-            except Exception:
-                return False
+        return True
 
     def modified_key_press(
         self,
@@ -1682,10 +1671,7 @@ class IbInputSimulatorDriver:
         normalized_key = self._normalize_key(key)
         if not normalized_key:
             return False
-        try:
-            hold_duration = max(0.0, float(duration))
-        except Exception:
-            hold_duration = _DEFAULT_KEY_HOLD_SECONDS
+        hold_duration = max(0.0, float(duration))
 
         normalized_held_keys: List[str] = []
         for item in held_keys or []:
@@ -1697,30 +1683,11 @@ class IbInputSimulatorDriver:
             return self.press_key(normalized_key, hold_duration)
 
         with self._key_lock:
-            try:
-                if self._sendinput_modified_key_press(normalized_key, normalized_held_keys, hold_duration):
-                    logger.info(
-                        "[IbInputSimulator][Logitech] 使用 SendInput 组合键兜底: held=%s key=%s",
-                        normalized_held_keys,
-                        normalized_key,
-                    )
-                    for held_key in normalized_held_keys:
-                        self._pressed_keys.add(held_key)
-                    self._pressed_keys.discard(normalized_key)
-                    return True
-
-                self._request(
-                    "modified_key_press",
-                    normalized_key,
-                    hold_duration,
-                    *normalized_held_keys,
-                )
-                for held_key in normalized_held_keys:
-                    self._pressed_keys.add(held_key)
-                self._pressed_keys.discard(normalized_key)
-                return True
-            except Exception:
-                return False
+            for held_key in normalized_held_keys:
+                self._sendinput_set_key_state(held_key, True)
+                self._request("key_down", held_key)
+                self._pressed_keys.add(held_key)
+            return self.press_key(normalized_key, hold_duration)
 
     def hotkey(self, *keys) -> bool:
         key_list = [self._normalize_key(str(item)) for item in keys if str(item).strip()]

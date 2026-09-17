@@ -68,6 +68,16 @@ def _build_workflow_subprocess_args(argv) -> tuple[int]:
     return (port,)
 
 
+def _build_external_component_subprocess_args(argv) -> tuple[int, str]:
+    port = get_cli_int_argument_value(argv, "--port", 0)
+    token = get_cli_argument_value(argv, "--token", "").strip()
+    if port <= 0:
+        raise ValueError("--port must be greater than zero for external component worker")
+    if not token:
+        raise ValueError("--token is required for external component worker")
+    return port, token
+
+
 def _log_ocr_subprocess_start(logger, _argv, args) -> None:
     install_root_log_translator()
     process_id, port = args
@@ -111,5 +121,16 @@ STANDALONE_SUBPROCESS_SPECS = (
         configure_root_logging=False,
         args_factory=_build_workflow_subprocess_args,
         startup_hook=_log_workflow_subprocess_start,
+    ),
+    StandaloneSubprocessSpec(
+        flag="--external-component-worker",
+        module_name="task_workflow.external_component_worker",
+        callable_name="run_external_component_worker_standalone",
+        logger_name="EXTERNAL_COMPONENT_SUBPROCESS",
+        error_label="外部组件子进程",
+        log_level=logging.INFO,
+        log_format=_WORKER_LOG_FORMAT,
+        configure_root_logging=False,
+        args_factory=_build_external_component_subprocess_args,
     ),
 )

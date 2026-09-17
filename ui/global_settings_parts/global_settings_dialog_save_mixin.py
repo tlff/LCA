@@ -24,6 +24,33 @@ logger = logging.getLogger(__name__)
 
 
 class GlobalSettingsDialogSaveMixin:
+    _REQUIRED_SETTINGS_CONTROLS = (
+        "mode_combo",
+        "screenshot_engine_combo",
+        "width_spinbox",
+        "height_spinbox",
+        "plugin_screenshot_engine_combo",
+        "plugin_input_display_combo",
+        "plugin_mouse_combo",
+        "plugin_keypad_combo",
+        "plugin_bind_kind_combo",
+        "plugin_bind_mode_combo",
+        "plugin_public_dropdown",
+        "plugin_text_ime_check",
+        "plugin_fake_active_check",
+        "plugin_reg_code_edit",
+        "plugin_extra_code_edit",
+    )
+
+    def _validate_required_controls(self) -> None:
+        missing = [name for name in self._REQUIRED_SETTINGS_CONTROLS if not hasattr(self, name)]
+        if missing:
+            raise RuntimeError(f"全局设置界面初始化不完整，缺少控件：{', '.join(missing)}")
+
+    def _selected_plugin_public(self) -> list[str]:
+        self._validate_required_controls()
+        return list(self.plugin_public_dropdown.selected())
+
 
     def _on_accept(self):
         """处理确定按钮点击事件，确保配置被正确保存"""
@@ -73,7 +100,7 @@ class GlobalSettingsDialogSaveMixin:
             self,
             "插件绑定提示",
             "插件键鼠的绑定图显与当前插件截图引擎不同。"
-            "大漠通常不能对同一窗口分离绑定；保存后仍会尝试用户选择，失败时运行时可能回退为同一 display。",
+            "大漠一次绑定同时决定图色和键鼠，两者不同会反复解绑重绑；保存后按所选参数绑定，失败不会改成同一图显。",
         )
     def get_target_window_title(self):
         """获取目标窗口标题"""
@@ -126,6 +153,7 @@ class GlobalSettingsDialogSaveMixin:
         return combo.currentText() if hasattr(combo, 'currentText') else None
     def get_settings(self) -> dict:
         """Returns the edited settings as a dictionary."""
+        self._validate_required_controls()
         internal_mode = self.mode_combo.currentData()
         if not internal_mode:
             selected_display_mode = self.mode_combo.currentText()
@@ -162,24 +190,24 @@ class GlobalSettingsDialogSaveMixin:
                     f"未知的截图引擎选项: {self.screenshot_engine_combo.currentText()!r}"
                 )
         plugin_mouse = normalize_plugin_mouse(
-            (self.plugin_mouse_combo.currentData() if hasattr(self, "plugin_mouse_combo") else None)
-            or self.current_config.get("plugin_mouse", "normal")
+            self.plugin_mouse_combo.currentData()
+            if hasattr(self, "plugin_mouse_combo")
+            else self.current_config.get("plugin_mouse")
         )
         plugin_keypad = normalize_plugin_keypad(
-            (self.plugin_keypad_combo.currentData() if hasattr(self, "plugin_keypad_combo") else None)
-            or self.current_config.get("plugin_keypad", "normal")
+            self.plugin_keypad_combo.currentData()
+            if hasattr(self, "plugin_keypad_combo")
+            else self.current_config.get("plugin_keypad")
         )
         follow_display = True
         if hasattr(self, "plugin_input_display_follow_check"):
             follow_display = bool(self.plugin_input_display_follow_check.isChecked())
         if follow_display and hasattr(self, "_followed_plugin_input_display"):
-            plugin_input_display = str(self._followed_plugin_input_display() or "normal").strip().lower()
+            plugin_input_display = str(self._followed_plugin_input_display()).strip().lower()
+        elif hasattr(self, "plugin_input_display_combo"):
+            plugin_input_display = str(self.plugin_input_display_combo.currentData() or "").strip().lower()
         else:
-            plugin_input_display = str(
-                (self.plugin_input_display_combo.currentData() if hasattr(self, "plugin_input_display_combo") else None)
-                or self.current_config.get("plugin_input_display", "normal")
-                or "normal"
-            ).strip().lower()
+            plugin_input_display = str(self.current_config.get("plugin_input_display") or "").strip().lower()
         if hasattr(self, "plugin_bind_mode_combo"):
             bind_raw = self.plugin_bind_mode_combo.currentData()
             if bind_raw is None:
@@ -191,10 +219,7 @@ class GlobalSettingsDialogSaveMixin:
             kind_raw = self.plugin_bind_kind_combo.currentData()
         else:
             kind_raw = self.current_config.get("plugin_bind_kind", "basic")
-        try:
-            plugin_bind_kind = normalize_plugin_bind_kind(kind_raw)
-        except ValueError:
-            plugin_bind_kind = "basic"
+        plugin_bind_kind = normalize_plugin_bind_kind(kind_raw)
         settings = {
             'execution_mode': effective_execution_mode,
             'native_execution_mode': internal_mode,
@@ -212,6 +237,7 @@ class GlobalSettingsDialogSaveMixin:
             "plugin_input_display_follow": follow_display,
             "plugin_bind_kind": plugin_bind_kind,
             "plugin_bind_mode": plugin_bind_mode,
+            "plugin_public": self._selected_plugin_public(),
             "plugin_text_ime": (
                 bool(self.plugin_text_ime_check.isChecked())
                 if hasattr(self, "plugin_text_ime_check")

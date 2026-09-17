@@ -69,6 +69,16 @@ class ImagePathResolver:
         images_dir = Path(get_images_dir("LCA")).resolve()
         self._search_paths = [images_dir]
 
+    @staticmethod
+    def _looks_like_package_logical(raw_path: str) -> bool:
+        text = str(raw_path or "").replace("\\", "/").strip()
+        if not text or text.startswith("memory://"):
+            return bool(text)
+        if os.path.isabs(str(raw_path or "").strip()):
+            return False
+        lowered = text.lower().lstrip("/")
+        return lowered.startswith("assets/")
+
     def add_search_path(self, path: str, priority: int = -1):
         try:
             p = Path(path).resolve()
@@ -82,36 +92,121 @@ class ImagePathResolver:
             self.clear_cache()
             logger.info(f"[路径解析器] 添加搜索路径: {p}")
 
-    def resolve(self, raw_path: str) -> Optional[str]:
+    def resolve(self, raw_path: str, search_dirs: Optional[List[str]] = None) -> Optional[str]:
         if not raw_path or not raw_path.strip():
             return None
         raw_path = raw_path.strip()
-        package_resolver = _package_asset_resolver
-        if package_resolver is not None:
-            try:
-                package_path = package_resolver(raw_path)
-                if package_path:
-                    return package_path
-            except Exception as exc:
-                logger.debug("[路径解析器] LCA 包资源解析失败: %s", exc)
         if raw_path.startswith("memory://"):
             return raw_path
+        cache_key = self._resolve_cache_key(raw_path, search_dirs)
         if self._cache_enabled:
             with self._cache_lock:
-                if raw_path in self._path_cache:
-                    cached = self._path_cache[raw_path]
-                    self._path_cache.move_to_end(raw_path)
+                if cache_key in self._path_cache:
+                    cached = self._path_cache[cache_key]
+                    self._path_cache.move_to_end(cache_key)
                     return cached
-        resolved = self._do_resolve(raw_path)
+        resolved = None
+        if self._looks_like_package_logical(raw_path):
+            package_resolver = _package_asset_resolver
+            if package_resolver is not None:
+                try:
+                    package_path = package_resolver(raw_path)
+                    if package_path:
+                        resolved = package_path
+                except Exception as exc:
+                    logger.debug("[路径解析器] LCA 包资源解析失败: %s", exc)
+        if not resolved:
+            resolved = self._do_resolve(
+                raw_path,
+                search_dirs,
+                include_defaults=False,
+                log_miss=False,
+            )
+        if not resolved and not self._looks_like_package_logical(raw_path):
+            package_resolver = _package_asset_resolver
+            if package_resolver is not None:
+                try:
+                    package_path = package_resolver(raw_path)
+                    if package_path:
+                        resolved = package_path
+                except Exception as exc:
+                    logger.debug("[路径解析器] LCA 包资源解析失败: %s", exc)
+        if not resolved:
+            resolved = self._do_resolve(
+                raw_path,
+                None,
+                include_defaults=True,
+                log_miss=True,
+            )
         # 未命中不缓存：截图刚落盘时预览常会先解析一次失败，缓存 None 会让刚保存的图一直显示“文件不存在”。
         if self._cache_enabled and resolved:
             with self._cache_lock:
-                self._path_cache[raw_path] = resolved
-                self._path_cache.move_to_end(raw_path)
+                self._path_cache[cache_key] = resolved
+                self._path_cache.move_to_end(cache_key)
                 self._prune_cache_locked()
         return resolved
 
-    def _do_resolve(self, raw_path: str) -> Optional[str]:
+    def _resolve_cache_key(self, raw_path: str, search_dirs: Optional[List[str]]) -> str:
+        extra = ""
+        if search_dirs:
+            extra = "|" + "|".join(str(item or "") for item in search_dirs)
+        bound = ""
+        try:
+            from task_workflow.resource_context import bound_images_dir
+
+            bound = bound_images_dir()
+        except Exception:
+            bound = ""
+        return f"{raw_path}||{bound}{extra}"
+
+    def _iter_search_dirs(
+        self,
+        search_dirs: Optional[List[str]] = None,
+        include_defaults: bool = True,
+    ) -> List[Path]:
+        ordered: List[Path] = []
+        seen = set()
+
+        def _add(raw) -> None:
+            text = str(raw or "").strip()
+            if not text:
+                return
+            try:
+                path = Path(text).resolve()
+            except Exception:
+                path = Path(text)
+            key = os.path.normcase(str(path))
+            if key in seen:
+                return
+            seen.add(key)
+            ordered.append(path)
+
+        for item in search_dirs or []:
+            _add(item)
+
+        bound = ""
+        try:
+            from task_workflow.resource_context import bound_images_dir
+
+            bound = bound_images_dir()
+        except Exception:
+            bound = ""
+        default_keys = {os.path.normcase(str(path)) for path in self._search_paths}
+        if bound and os.path.normcase(str(Path(bound))) not in default_keys:
+            _add(bound)
+
+        if include_defaults:
+            for path in self._search_paths:
+                _add(path)
+        return ordered
+
+    def _do_resolve(
+        self,
+        raw_path: str,
+        search_dirs: Optional[List[str]] = None,
+        include_defaults: bool = True,
+        log_miss: bool = True,
+    ) -> Optional[str]:
         if raw_path.startswith("memory://"):
             return raw_path
         normalized = Path(raw_path)
@@ -125,20 +220,34 @@ class ImagePathResolver:
                 return raw_path
             filename = normalized.name
             relative_parts = normalized.parts
-        for search_dir in self._search_paths:
-            if relative_parts and len(relative_parts) > 1:
-                start_idx = 1 if relative_parts[0].lower() == "images" else 0
-                if start_idx < len(relative_parts):
-                    candidate = search_dir / Path(*relative_parts[start_idx:])
-                    if candidate.exists() and candidate.is_file():
-                        logger.debug(f"[路径解析器] 找到(子目录): {raw_path} -> {candidate}")
-                        return str(candidate)
+        relative_suffix = self._strip_image_logical_prefix(relative_parts)
+        for search_dir in self._iter_search_dirs(search_dirs, include_defaults=include_defaults):
+            if relative_suffix:
+                candidate = search_dir / Path(*relative_suffix)
+                if candidate.exists() and candidate.is_file():
+                    logger.debug(f"[路径解析器] 找到(子目录): {raw_path} -> {candidate}")
+                    return str(candidate)
             candidate = search_dir / filename
             if candidate.exists() and candidate.is_file():
                 logger.debug(f"[路径解析器] 找到: {raw_path} -> {candidate}")
                 return str(candidate)
-        logger.warning(f"[路径解析器] 未找到: {raw_path}")
+        if log_miss:
+            logger.warning(f"[路径解析器] 未找到: {raw_path}")
         return None
+
+    @staticmethod
+    def _strip_image_logical_prefix(parts: Optional[tuple]) -> tuple:
+        if not parts:
+            return ()
+        index = 0
+        first = str(parts[0]).lower()
+        if first == "assets" and len(parts) >= 2 and str(parts[1]).lower() == "images":
+            index = 2
+        elif first == "images":
+            index = 1
+        if index >= len(parts):
+            return ()
+        return parts[index:]
 
     def _extract_relative_path(self, abs_path: str) -> Optional[tuple]:
         try:
@@ -152,10 +261,15 @@ class ImagePathResolver:
         except Exception:
             return None
 
-    def resolve_many(self, paths: List[str], filter_invalid: bool = True) -> List[str]:
+    def resolve_many(
+        self,
+        paths: List[str],
+        filter_invalid: bool = True,
+        search_dirs: Optional[List[str]] = None,
+    ) -> List[str]:
         results = []
         for item in paths:
-            resolved = self.resolve(item)
+            resolved = self.resolve(item, search_dirs=search_dirs)
             if resolved is not None:
                 results.append(resolved)
             elif not filter_invalid:

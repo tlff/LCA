@@ -19,6 +19,7 @@ from utils.input.input_timing import (
     DEFAULT_DOUBLE_CLICK_INTERVAL_SECONDS,
     DEFAULT_KEY_HOLD_SECONDS,
 )
+from utils.input.key_repeat import hold_with_system_repeat
 from utils.precise_sleep import precise_sleep as _shared_precise_sleep
 from utils.input.uiautomation_runtime import import_uiautomation
 
@@ -94,7 +95,6 @@ class StandardWindowInputSimulator(BaseInputSimulator):
         self.enable_message_guard = enable_message_guard
         self.execution_mode = (execution_mode or "").strip().lower()
         self.use_async_message = (not use_foreground) and self.execution_mode == "background_postmessage"
-        self._dx_input = None
 
         # 初始化增强模块
         if not use_foreground:
@@ -191,22 +191,6 @@ class StandardWindowInputSimulator(BaseInputSimulator):
         normalized = {str(name or "").strip().lower().replace("_", "") for name in names}
         return bool(normalized & {"logitech", "logitechghubnew", "ibinputsimulatordriverlogitech"})
 
-    def _using_plugin_dx(self) -> bool:
-        from .mode_utils import is_plugin_input_backend
-
-        from utils.runtime_config import get_runtime_config
-
-        cfg = get_runtime_config()
-        cfg.setdefault("execution_mode", self.execution_mode)
-        return bool(is_plugin_input_backend(cfg))
-
-    def _plugin_dx(self):
-        if self._dx_input is None:
-            from utils.plugin.dx_input import PluginDxInput
-
-            self._dx_input = PluginDxInput(self.hwnd)
-        return self._dx_input
-
     def _get_virtual_screen_bounds(self) -> Tuple[int, int, int, int]:
         """获取虚拟桌面边界，兼容负坐标多屏布局。"""
         left = int(win32api.GetSystemMetrics(76))   # SM_XVIRTUALSCREEN
@@ -226,7 +210,6 @@ class StandardWindowInputSimulator(BaseInputSimulator):
             self._ib_runtime_signature = None
             self._last_input_control_hwnd = None
             self._virtual_cursor = None
-            self._dx_input = None
             if hasattr(self, "child_finder"):
                 self.child_finder = None
             if hasattr(self, "window_activator"):
@@ -1162,8 +1145,6 @@ class StandardWindowInputSimulator(BaseInputSimulator):
     def send_key_to_control(self, control_hwnd: int, vk_code: int, scan_code: int = 0, extended: bool = False) -> bool:
         """向指定控件发送按键"""
         try:
-            if self._using_plugin_dx():
-                return bool(self._plugin_dx().key_press(int(vk_code)))
             if not control_hwnd:
                 return False
             if scan_code == 0:
@@ -1189,8 +1170,6 @@ class StandardWindowInputSimulator(BaseInputSimulator):
 
     def move_mouse(self, x: int, y: int) -> bool:
         try:
-            if self._using_plugin_dx():
-                return bool(self._plugin_dx().move_to(int(x), int(y)))
             if self.use_foreground:
                 if not self._ensure_driver():
                     return False
@@ -1207,8 +1186,6 @@ class StandardWindowInputSimulator(BaseInputSimulator):
 
     def mouse_down(self, x: int, y: int, button: str = 'left') -> bool:
         try:
-            if self._using_plugin_dx():
-                return bool(self._plugin_dx().move_to(int(x), int(y)) and self._plugin_dx().mouse_down(button))
             if self.use_foreground:
                 if not self._ensure_driver():
                     return False
@@ -1231,8 +1208,6 @@ class StandardWindowInputSimulator(BaseInputSimulator):
 
     def mouse_up(self, x: int, y: int, button: str = 'left') -> bool:
         try:
-            if self._using_plugin_dx():
-                return bool(self._plugin_dx().move_to(int(x), int(y)) and self._plugin_dx().mouse_up(button))
             if self.use_foreground:
                 if not self._ensure_driver():
                     return False
@@ -1274,12 +1249,6 @@ class StandardWindowInputSimulator(BaseInputSimulator):
         except Exception:
             safe_hold = DEFAULT_CLICK_HOLD_SECONDS
         try:
-            if self._using_plugin_dx():
-                return bool(
-                    self._plugin_dx().double_click(
-                        int(x), int(y), button=button, interval=safe_interval, hold_duration=safe_hold
-                    )
-                )
             if self.use_foreground:
                 foreground_interval = _clamp_foreground_double_click_interval(safe_interval)
                 if foreground_interval < safe_interval:
@@ -1574,8 +1543,6 @@ class StandardWindowInputSimulator(BaseInputSimulator):
 
     def scroll(self, x: int, y: int, delta: int) -> bool:
         try:
-            if self._using_plugin_dx():
-                return bool(self._plugin_dx().wheel(int(x), int(y), int(delta)))
             if self.use_foreground:
                 if not self._ensure_driver():
                     return False
@@ -1612,8 +1579,6 @@ class StandardWindowInputSimulator(BaseInputSimulator):
 
     def send_key_down(self, vk_code: int, scan_code: int = 0, extended: bool = False) -> bool:
         try:
-            if self._using_plugin_dx():
-                return bool(self._plugin_dx().key_down(int(vk_code)))
             if self.use_foreground:
                 if not self._ensure_driver():
                     return False
@@ -1637,10 +1602,26 @@ class StandardWindowInputSimulator(BaseInputSimulator):
         except Exception:
             return False
 
+    def send_key_repeat(self, vk_code: int, scan_code: int = 0, extended: bool = False) -> bool:
+        """补发一次 WM_KEYDOWN（已按下位），模拟系统键盘连发。"""
+        try:
+            if scan_code == 0:
+                scan_code = win32api.MapVirtualKey(vk_code, 0)
+            lparam = self._make_lparam(scan_code, extended, 1, True, False)
+            window_chain = self._background_key_targets()
+            for hwnd_to_send in window_chain:
+                try:
+                    self._send_message(hwnd_to_send, win32con.WM_KEYDOWN, vk_code, lparam)
+                except Exception:
+                    pass
+            if not self._confirm_background_message_delivery(window_chain):
+                return False
+            return True
+        except Exception:
+            return False
+
     def send_key_up(self, vk_code: int, scan_code: int = 0, extended: bool = False) -> bool:
         try:
-            if self._using_plugin_dx():
-                return bool(self._plugin_dx().key_up(int(vk_code)))
             if self.use_foreground:
                 if not self._ensure_driver():
                     return False
@@ -1670,14 +1651,17 @@ class StandardWindowInputSimulator(BaseInputSimulator):
         except Exception:
             return False
 
-    def send_key_hold(self, vk_code: int, duration: float = 0.0, scan_code: int = 0, extended: bool = False) -> bool:
-        """
-        按键保持（优先显式 down->hold->up，确保保持时长可控）。
-        """
-        try:
-            safe_duration = max(0.0, float(duration))
-        except Exception:
-            safe_duration = 0.0
+    def send_key_hold(
+        self,
+        vk_code: int,
+        duration: float = 0.0,
+        scan_code: int = 0,
+        extended: bool = False,
+        enable_repeat: bool = True,
+        repeat_interval: Optional[float] = None,
+    ) -> bool:
+        """按住指定时长；enable_repeat 为真时按间隔或系统键盘重复率补发。"""
+        safe_duration = max(0.0, float(duration))
 
         try:
             if self.use_foreground:
@@ -1686,38 +1670,25 @@ class StandardWindowInputSimulator(BaseInputSimulator):
                 key_name = self._vk_to_driver_key(vk_code)
                 if not key_name:
                     return False
-                # 前台优先走驱动原子按住，避免 down/up 两次调用被并发插队导致时长漂移。
-                press_key_fn = getattr(self.driver, "press_key", None)
-                if callable(press_key_fn):
-                    return bool(press_key_fn(key_name, safe_duration))
-                key_down_fn = getattr(self.driver, "key_down", None)
-                key_up_fn = getattr(self.driver, "key_up", None)
-                if callable(key_down_fn) and callable(key_up_fn):
-                    down_sent = False
-                    try:
-                        if not bool(key_down_fn(key_name)):
-                            return False
-                        down_sent = True
-                        if safe_duration > 0:
-                            _shared_precise_sleep(safe_duration, spin_threshold=0.05, coarse_slice=0.005)
-                        if not bool(key_up_fn(key_name)):
-                            return False
-                        down_sent = False
-                        return True
-                    finally:
-                        if down_sent:
-                            try:
-                                key_up_fn(key_name)
-                            except Exception:
-                                pass
+                return hold_with_system_repeat(
+                    down=lambda: bool(self.driver.key_down(key_name)),
+                    up=lambda: bool(self.driver.key_up(key_name)),
+                    repeat=lambda: bool(self.driver.key_up(key_name)) and bool(self.driver.key_down(key_name)),
+                    duration=safe_duration,
+                    sleep=lambda seconds: _shared_precise_sleep(seconds, spin_threshold=0.05, coarse_slice=0.005),
+                    enable_repeat=bool(enable_repeat),
+                    repeat_interval=repeat_interval,
+                )
 
-            if not self.send_key_down(vk_code, scan_code, extended):
-                return False
-            try:
-                if safe_duration > 0:
-                    _shared_precise_sleep(safe_duration, spin_threshold=0.05, coarse_slice=0.005)
-            finally:
-                return bool(self.send_key_up(vk_code, scan_code, extended))
+            return hold_with_system_repeat(
+                down=lambda: bool(self.send_key_down(vk_code, scan_code, extended)),
+                up=lambda: bool(self.send_key_up(vk_code, scan_code, extended)),
+                repeat=lambda: bool(self.send_key_repeat(vk_code, scan_code, extended)),
+                duration=safe_duration,
+                sleep=lambda seconds: _shared_precise_sleep(seconds, spin_threshold=0.05, coarse_slice=0.005),
+                enable_repeat=bool(enable_repeat),
+                repeat_interval=repeat_interval,
+            )
         except Exception:
             return False
 
@@ -1784,8 +1755,6 @@ class StandardWindowInputSimulator(BaseInputSimulator):
                 if not self._ensure_driver():
                     return False
                 return self.driver.type_text(text)
-            if self._using_plugin_dx():
-                return bool(self._plugin_dx().send_text(str(text or "")))
             return self._find_and_send_to_input_control(text, stop_checker=stop_checker)
         except InterruptedError:
             raise
@@ -1890,8 +1859,6 @@ class StandardWindowInputSimulator(BaseInputSimulator):
     ) -> bool:
         """鼠标点击"""
         try:
-            if self._using_plugin_dx():
-                return bool(self._plugin_dx().click(x, y, button, clicks, interval, duration))
             if self.use_foreground:
                 return self._foreground_click(x, y, button, clicks, interval, duration)
             else:
@@ -2565,6 +2532,7 @@ class StandardWindowInputSimulator(BaseInputSimulator):
         search_depth: int = 10,
         timeout: float = 5.0,
         use_invoke: bool = True,
+        strict_invoke: bool = False,
         button: str = 'left'
     ) -> bool:
         """
@@ -2581,6 +2549,7 @@ class StandardWindowInputSimulator(BaseInputSimulator):
             search_depth: 搜索深度
             timeout: 超时时间（秒）
             use_invoke: True使用Invoke模式（不移动鼠标），False使用坐标点击
+            strict_invoke: True 时 Invoke/坐标不可用直接失败，不执行隐式 Click 回退
             button: 鼠标按钮 ('left', 'right', 'middle')
 
         Returns:
@@ -2673,7 +2642,13 @@ class StandardWindowInputSimulator(BaseInputSimulator):
                         invoke_pattern.Invoke()
                         self.logger.info("[元素点击] 使用 Invoke 模式点击成功")
                         return True
+                    if strict_invoke:
+                        self.logger.error("[元素点击] 元素不支持 Invoke 模式，严格模式拒绝坐标回退")
+                        return False
                 except Exception as invoke_error:
+                    if strict_invoke:
+                        self.logger.error(f"[元素点击] Invoke 模式失败，严格模式拒绝坐标回退: {invoke_error}")
+                        return False
                     self.logger.debug(f"[元素点击] Invoke 模式失败: {invoke_error}，回退到坐标点击")
 
             # 使用坐标点击
@@ -2695,10 +2670,15 @@ class StandardWindowInputSimulator(BaseInputSimulator):
                         return self._background_click(client_x, client_y, button, 1, 0.1)
                     except Exception as coord_error:
                         self.logger.error(f"[元素点击] 坐标转换失败: {coord_error}")
+                        if strict_invoke:
+                            return False
                         # 回退到 uiautomation 的 Click 方法
                         element.Click()
                         return True
             else:
+                if strict_invoke:
+                    self.logger.error("[元素点击] BoundingRectangle 无效，严格模式拒绝 Click 回退")
+                    return False
                 # BoundingRectangle 无效，使用 uiautomation 的 Click 方法
                 element.Click()
                 self.logger.info("[元素点击] 使用 uiautomation.Click() 成功")
@@ -2819,8 +2799,13 @@ class StandardWindowInputSimulator(BaseInputSimulator):
                         return False
                     if class_name is not None and element.ClassName != class_name:
                         return False
-                    if control_type is not None and element.ControlTypeName != control_type.replace('Control', ''):
-                        return False
+                    if control_type is not None:
+                        actual_type = str(getattr(element, 'ControlTypeName', '') or '')
+                        expected_type = str(control_type)
+                        # uiautomation 版本间有的返回 ButtonControl，有的返回 Button；两种都接受。
+                        if actual_type.casefold() not in {expected_type.casefold(), expected_type.replace('Control', '').casefold()} \
+                                and actual_type.replace('Control', '').casefold() != expected_type.replace('Control', '').casefold():
+                            return False
                     return True
                 except Exception:
                     return False

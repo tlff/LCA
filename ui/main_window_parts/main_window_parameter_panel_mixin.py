@@ -1,7 +1,8 @@
 import logging
 from typing import Any, Dict
+from utils.window.hwnd_utils import as_hwnd
 from utils.window.window_binding_utils import get_active_bound_window_hwnd, get_active_target_window_title
-from typing import Any
+from utils.window.window_identity import is_window_alive
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import (
     QApplication,
@@ -53,6 +54,43 @@ class MainWindowParameterPanelMixin:
                         })
             logger.info(f"随机跳转卡片 {card_id} 的连接目标: {random_jump_connections}")
         # 【关键修改】优先获取当前标签页绑定的窗口句柄
+        target_window_hwnd = self._resolve_panel_target_hwnd()
+        # 显示参数面板
+        # 获取任务模块
+        task_module = self.task_modules.get(card.task_type) if hasattr(self, 'task_modules') else None
+        # 为随机跳转任务动态更新参数
+        updated_parameters = card.parameters.copy()
+        if card.task_type == '随机跳转':
+            from tasks.random_jump import prune_branch_weights
+            updated_parameters['random_weights'] = prune_branch_weights(
+                updated_parameters.get('random_weights'),
+                [item.get('card_id') for item in random_jump_connections],
+            )
+            # 直接传入连接列表数据
+            updated_parameters['_random_connections'] = random_jump_connections if random_jump_connections else []
+        task_images_dir = self._resolve_task_images_dir()
+        task_sounds_dir = self._resolve_task_sounds_dir()
+        from task_workflow.resource_context import bind_resource_dirs
+
+        bind_resource_dirs(self._current_task_resource_dirs())
+        self.parameter_panel.show_parameters(
+            card_id=card_id,
+            task_type=card.task_type,
+            param_definitions=card.param_definitions,
+            current_parameters=updated_parameters,
+            workflow_cards_info=workflow_info,
+            images_dir=task_images_dir,
+            sounds_dir=task_sounds_dir,
+            target_window_hwnd=target_window_hwnd,
+            task_module=task_module,
+            main_window=self,
+            custom_name=card.custom_name
+        )
+        # 标记参数面板为可见状态
+        self._parameter_panel_visible = True
+
+    def _resolve_panel_target_hwnd(self):
+        """解析参数面板/脚本编辑器要用的绑定窗口句柄：任务优先，其次全局配置。"""
         target_window_hwnd = None
         # 1. 优先从当前标签页的任务获取绑定的窗口句柄
         if hasattr(self, 'workflow_tab_widget') and self.workflow_tab_widget:
@@ -61,8 +99,15 @@ class MainWindowParameterPanelMixin:
                 task_manager = self.workflow_tab_widget.task_manager
                 current_task = task_manager.get_task(current_task_id)
                 if current_task and current_task.target_hwnd:
-                    target_window_hwnd = current_task.target_hwnd
-                    logger.info(f"使用当前标签页绑定的窗口句柄: {target_window_hwnd} (来自任务'{current_task.name}')")
+                    task_hwnd = as_hwnd(current_task.target_hwnd)
+                    still_bound = True
+                    if hasattr(self, "is_hwnd_bound"):
+                        still_bound = bool(self.is_hwnd_bound(task_hwnd))
+                    if task_hwnd and is_window_alive(task_hwnd) and still_bound:
+                        target_window_hwnd = task_hwnd
+                        logger.info(f"使用当前标签页绑定的窗口句柄: {target_window_hwnd} (来自任务'{current_task.name}')")
+                    else:
+                        logger.info("当前标签页绑定窗口已失效或不在绑定列表中，改用全局配置")
         # 2. 如果标签页没有绑定,回退到全局配置
         if not target_window_hwnd and hasattr(self, 'config') and self.config:
             logger.info("当前标签页未绑定窗口,使用全局配置")
@@ -77,42 +122,74 @@ class MainWindowParameterPanelMixin:
                     if target_window_hwnd:
                         logger.info(f"单窗口模式通过标题找到句柄: {target_window_hwnd}")
         elif not target_window_hwnd and hasattr(self, 'runner') and self.runner:
-            target_window_hwnd = getattr(self.runner, 'target_hwnd', None)
-        # 显示参数面板
-        # 获取任务模块
-        task_module = self.task_modules.get(card.task_type) if hasattr(self, 'task_modules') else None
-        # 为随机跳转任务动态更新参数
-        updated_parameters = card.parameters.copy()
-        if card.task_type == '随机跳转':
-            from tasks.random_jump import prune_branch_weights
-            updated_parameters['random_weights'] = prune_branch_weights(
-                updated_parameters.get('random_weights'),
-                [item.get('card_id') for item in random_jump_connections],
-            )
-            # 直接传入连接列表数据
-            updated_parameters['_random_connections'] = random_jump_connections if random_jump_connections else []
-        task_images_dir = self.images_dir
+            runner_hwnd = as_hwnd(getattr(self.runner, 'target_hwnd', None))
+            if runner_hwnd and is_window_alive(runner_hwnd):
+                target_window_hwnd = runner_hwnd
+        return target_window_hwnd
+
+    def _resolve_task_images_dir(self):
+        """当前任务的 images_dir（同运行时/采集），拿不到时回退主窗口 images_dir。"""
+        task_images_dir = getattr(self, 'images_dir', None)
         if hasattr(self, 'workflow_tab_widget') and self.workflow_tab_widget:
             current_task_id = self.workflow_tab_widget.get_current_task_id()
             task_manager = getattr(self.workflow_tab_widget, 'task_manager', None)
-            if task_manager:
+            if task_manager is not None and current_task_id is not None:
                 current_task = task_manager.get_task(current_task_id)
                 if current_task and getattr(current_task, 'images_dir', None):
                     task_images_dir = current_task.images_dir
-        self.parameter_panel.show_parameters(
-            card_id=card_id,
-            task_type=card.task_type,
-            param_definitions=card.param_definitions,
-            current_parameters=updated_parameters,
-            workflow_cards_info=workflow_info,
-            images_dir=task_images_dir,
-            target_window_hwnd=target_window_hwnd,
-            task_module=task_module,
-            main_window=self,
-            custom_name=card.custom_name
-        )
-        # 标记参数面板为可见状态
-        self._parameter_panel_visible = True
+        return task_images_dir
+
+    def _resolve_task_sounds_dir(self):
+        """当前任务的 sounds_dir，拿不到时回退全局音效目录。"""
+        from utils.app_paths import get_sounds_dir
+
+        task_sounds_dir = ""
+        if hasattr(self, 'workflow_tab_widget') and self.workflow_tab_widget:
+            current_task_id = self.workflow_tab_widget.get_current_task_id()
+            task_manager = getattr(self.workflow_tab_widget, 'task_manager', None)
+            if task_manager is not None and current_task_id is not None:
+                current_task = task_manager.get_task(current_task_id)
+                if current_task and getattr(current_task, 'sounds_dir', None):
+                    task_sounds_dir = current_task.sounds_dir
+        return task_sounds_dir or get_sounds_dir("LCA")
+
+    def _current_task_resource_dirs(self) -> dict:
+        from task_workflow.resource_context import resource_dirs_from_mapping
+
+        current_task = None
+        if hasattr(self, "workflow_tab_widget") and self.workflow_tab_widget:
+            current_task_id = self.workflow_tab_widget.get_current_task_id()
+            task_manager = getattr(self.workflow_tab_widget, "task_manager", None)
+            if task_manager is not None and current_task_id is not None:
+                current_task = task_manager.get_task(current_task_id)
+        dirs = resource_dirs_from_mapping(current_task)
+        if not dirs.get("images_dir"):
+            dirs["images_dir"] = str(self._resolve_task_images_dir() or "")
+        if not dirs.get("sounds_dir"):
+            dirs["sounds_dir"] = str(self._resolve_task_sounds_dir() or "")
+        return dirs
+
+    def _script_debug_context(self, card) -> Dict[str, Any]:
+        """编辑器调试运行用的上下文：绑定窗口、执行模式、资源目录、卡片编号。"""
+        execution_mode = getattr(self, 'current_execution_mode', None)
+        if not execution_mode and hasattr(self, 'config') and self.config:
+            execution_mode = self.config.get('execution_mode')
+        execution_mode = execution_mode or 'background_sendmessage'
+        dirs = self._current_task_resource_dirs()
+        from task_workflow.resource_context import bind_resource_dirs
+
+        bind_resource_dirs(dirs)
+        return {
+            "target_hwnd": self._resolve_panel_target_hwnd(),
+            "execution_mode": execution_mode,
+            "images_dir": dirs.get("images_dir") or "",
+            "sounds_dir": dirs.get("sounds_dir") or "",
+            "dicts_dir": dirs.get("dicts_dir") or "",
+            "yolo_dir": dirs.get("yolo_dir") or "",
+            "replays_dir": dirs.get("replays_dir") or "",
+            "plugins_dir": dirs.get("plugins_dir") or "",
+            "card_id": getattr(card, "card_id", None),
+        }
 
     def _show_script_editor(self, card) -> None:
         """自定义脚本走独立编辑窗，不打开通用参数面板。"""
@@ -133,18 +210,24 @@ class MainWindowParameterPanelMixin:
             try:
                 source = str((card.parameters or {}).get("script_source") or "")
                 if hasattr(existing, "reload_source"):
-                    existing.reload_source(source)
+                    existing.reload_source(
+                        source,
+                        bool((card.parameters or {}).get("allow_external_components", False)),
+                    )
                 existing.raise_()
                 existing.activateWindow()
                 return
             except RuntimeError:
                 editors.pop(card.card_id, None)
 
+        card_params = card.parameters or {}
         dialog = ScriptEditorDialog(
             card_id=card.card_id,
-            source=str((card.parameters or {}).get("script_source") or ""),
+            source=str(card_params.get("script_source") or ""),
             custom_name=getattr(card, "custom_name", None),
-            on_applied=lambda source: self._persist_script_source(card, source),
+            allow_external_components=bool(card_params.get("allow_external_components", False)),
+            on_applied=lambda source, allow: self._persist_script_source(card, source, allow),
+            debug_context_provider=lambda: self._script_debug_context(card),
             parent=self,
         )
         dialog.setWindowModality(Qt.WindowModality.WindowModal)
@@ -159,7 +242,7 @@ class MainWindowParameterPanelMixin:
         self._script_editors[card.card_id] = dialog
         dialog.show()
 
-    def _persist_script_source(self, card, source: str) -> None:
+    def _persist_script_source(self, card, source: str, allow_external_components: bool = False) -> None:
         """直接写回打开编辑器时的那张卡，不依赖 exec() 是否还活着。"""
         if card is None:
             logger.error("自定义脚本写入失败：卡片已失效")
@@ -167,6 +250,9 @@ class MainWindowParameterPanelMixin:
         if not isinstance(getattr(card, "parameters", None), dict):
             card.parameters = {}
         card.parameters["script_source"] = str(source or "")
+        from tasks.script_task import script_source_hash
+        card.parameters["script_source_sha256"] = script_source_hash(source)
+        card.parameters["allow_external_components"] = bool(allow_external_components)
         if hasattr(card, "_tooltip_needs_update"):
             card._tooltip_needs_update = True
         if hasattr(card, "_cached_tooltip"):

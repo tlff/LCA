@@ -23,8 +23,9 @@ from app_core.hotkey_spec import display_hotkey, normalize_hotkey
 from app_core.player.player_ui_state import extract_settings_from_ui
 
 PLUGIN_LOCAL_HINT = (
-    "插件：通用 / GDI2（无需挂钩）；DX / OpenGL（需注入）。"
-    "需要 tools/plugin 下 PluginHost.exe、dm.dll、RegDll.dll"
+    "插件：通用 / GDI2（无需挂钩）；DX / OpenGL 明细（需注入）。"
+    "使用 tools/plugin 下的 x86 PluginHost.exe + dm.dll 免注册加载；"
+    "注册码仍由 dm.Ver + dm.Reg 验证。"
 )
 
 
@@ -94,6 +95,10 @@ class PlayerSettingsDialog(QDialog):
         group = QGroupBox("插件", self)
         form = QFormLayout(group)
         form.setSpacing(8)
+        plugin_hint = QLabel(PLUGIN_LOCAL_HINT)
+        plugin_hint.setWordWrap(True)
+        plugin_hint.setToolTip(PLUGIN_LOCAL_HINT)
+        form.addRow(plugin_hint)
         local_cfg = {}
         try:
             loaded = load_config()
@@ -101,10 +106,6 @@ class PlayerSettingsDialog(QDialog):
                 local_cfg = loaded
         except Exception:
             local_cfg = {}
-        plugin_hint = QLabel(PLUGIN_LOCAL_HINT)
-        plugin_hint.setWordWrap(True)
-        plugin_hint.setToolTip(PLUGIN_LOCAL_HINT)
-        form.addRow(plugin_hint)
         self.plugin_reg_code_edit = QLineEdit(str(local_cfg.get("plugin_reg_code", "") or ""))
         self.plugin_reg_code_edit.setObjectName("plugin_reg_code_edit")
         self.plugin_reg_code_edit.setEchoMode(QLineEdit.EchoMode.Password)

@@ -8,9 +8,8 @@ import logging
 import os
 import threading
 from typing import Dict, Any, Optional, Union, Tuple
-from pathlib import Path
 
-from utils.app_paths import get_app_root
+from utils.app_paths import get_universal_config_path
 
 logger = logging.getLogger(__name__)
 
@@ -24,8 +23,8 @@ class UniversalConfigManager:
         self._load_config()
     
     def _get_default_config_file(self) -> str:
-        """配置文件在程序根目录，不再从旧路径拷贝。"""
-        return str(Path(get_app_root()) / "universal_system_config.json")
+        """配置文件在用户数据目录，不写入程序根目录。"""
+        return get_universal_config_path()
     
     def _load_config(self):
         """加载配置文件"""

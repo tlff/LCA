@@ -3,7 +3,18 @@ from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QPushButton,
     QSpacerItem, QSizePolicy, QButtonGroup, QFrame, QScrollArea
 )
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
+
+
+class _TaskTypeButton(QPushButton):
+    """任务类型按钮：单击选中，双击直接确认添加。"""
+
+    double_clicked = Signal()
+
+    def mouseDoubleClickEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.double_clicked.emit()
+        super().mouseDoubleClickEvent(event)
 
 
 class SelectTaskDialog(QDialog):
@@ -23,7 +34,7 @@ class SelectTaskDialog(QDialog):
         self.main_layout.setContentsMargins(20, 20, 20, 20)
 
         # --- Info Label ---
-        self.info_label = QLabel("请选择要添加的任务类型:")
+        self.info_label = QLabel("请选择要添加的任务类型，双击可直接添加:")
         self.info_label.setObjectName("infoLabel")
         self.main_layout.addWidget(self.info_label)
 
@@ -43,7 +54,7 @@ class SelectTaskDialog(QDialog):
             col = i % num_cols
 
             display_text = task_type
-            btn = QPushButton(display_text)
+            btn = _TaskTypeButton(display_text)
             btn.setCheckable(True)
             btn.setMinimumHeight(36)
             btn.setMinimumWidth(150)
@@ -53,8 +64,8 @@ class SelectTaskDialog(QDialog):
             self.task_buttons[task_type] = btn
             grid_layout.addWidget(btn, row, col)
 
-            # 点击按钮时记录选择
             btn.clicked.connect(lambda checked, t=task_type: self._on_task_selected(t))
+            btn.double_clicked.connect(lambda t=task_type: self._on_task_double_clicked(t))
 
         # 默认选中第一个
         if task_types:
@@ -128,6 +139,11 @@ class SelectTaskDialog(QDialog):
     def _on_task_selected(self, task_type: str):
         """记录用户选择的任务类型"""
         self._selected_task_type = task_type
+
+    def _on_task_double_clicked(self, task_type: str):
+        """双击任务类型后直接确认添加，无需再点确定。"""
+        self._on_task_selected(task_type)
+        self.accept()
 
     def selected_task_type(self) -> Optional[str]:
         """Returns the currently selected task type."""

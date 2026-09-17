@@ -45,7 +45,7 @@ BIND_ERROR_MESSAGES: dict[int, str] = {
 
 @dataclass(frozen=True)
 class BindOutcome:
-    """一次 bind RPC 的结果。宿主返回字典；老宿主或测试桩只返回布尔值时也能构造。"""
+    """一次 bind RPC 的结果。宿主必须返回含 ok / last_error 等字段的对象。"""
 
     ok: bool
     last_error: int = 0
@@ -79,7 +79,7 @@ class BindOutcome:
                 registered=bool(result.get("registered")),
                 registrations=registrations,
             )
-        return cls(ok=bool(result))
+        raise TypeError(f"bind 返回值必须是对象: {type(result).__name__}")
 
 
 def describe_bind_error_code(last_error: int) -> str:

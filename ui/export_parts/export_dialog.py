@@ -36,7 +36,8 @@ from ui.export_parts.standalone_installer import (
     INNO_SETUP_DOWNLOAD_PAGE,
     MissingChineseLanguageError,
     MissingInnoSetupError,
-    find_iscc,
+    OutdatedInnoSetupError,
+    require_iscc,
 )
 from ui.widgets.no_wheel_spinbox import NoWheelSpinBox as _NoWheelSpinBox
 from utils.app_paths import get_images_dir, get_sounds_dir, get_user_data_dir
@@ -517,11 +518,18 @@ class StandaloneExportDialog(QDialog):
         entry = next((item for item in catalog if item.get("id") == entry_id), None)
         workflow_data = dict((entry or catalog[0]).get("workflow_data") or {})
         parent_file = str((entry or catalog[0]).get("filepath") or "")
+        from task_workflow.workspace import resolve_runtime_resource_dirs
+
+        resource_dirs = resolve_runtime_resource_dirs(
+            workflow_data,
+            workflow_filepath=parent_file,
+            default_images_dir=str(getattr(self._main, "images_dir", "") or get_images_dir("LCA")),
+        )
         return {
             "workflow_data": workflow_data,
             "config": runtime_config_from_main(self._main),
-            "images_dir": str(getattr(self._main, "images_dir", "") or get_images_dir("LCA")),
-            "sounds_dir": get_sounds_dir("LCA"),
+            "images_dir": str(resource_dirs.get("images_dir") or get_images_dir("LCA")),
+            "sounds_dir": str(resource_dirs.get("sounds_dir") or get_sounds_dir("LCA")),
             "parent_workflow_file": parent_file,
             "app_name": self._name_edit.text().strip() or "独立程序",
             "required_client_width": required_width,
@@ -613,11 +621,11 @@ class StandaloneExportDialog(QDialog):
         except Exception:
             logger.exception("导出前同步参数面板失败")
 
-    def _prompt_install_inno_setup(self, detail: str = ""):
+    def _prompt_inno_setup_download(self, *, title: str, text: str, detail: str = ""):
         box = QMessageBox(self)
         box.setIcon(QMessageBox.Icon.Warning)
-        box.setWindowTitle("请先安装 Inno Setup 6")
-        box.setText("制作安装包需要本机已安装 Inno Setup 6。")
+        box.setWindowTitle(title)
+        box.setText(text)
         box.setInformativeText(
             "请安装完成后再试。Inno Setup 不随本程序打包，以免增大体积。\n\n"
             + (
@@ -631,6 +639,20 @@ class StandaloneExportDialog(QDialog):
         box.exec()
         if box.clickedButton() == open_btn:
             QDesktopServices.openUrl(QUrl(INNO_SETUP_DOWNLOAD_PAGE))
+
+    def _prompt_install_inno_setup(self, detail: str = ""):
+        self._prompt_inno_setup_download(
+            title="请先安装 Inno Setup",
+            text="制作安装包需要本机已安装 Inno Setup 6.3 或更高版本。",
+            detail=detail,
+        )
+
+    def _prompt_outdated_inno_setup(self, detail: str = ""):
+        self._prompt_inno_setup_download(
+            title="Inno Setup 版本过旧",
+            text="本机 Inno Setup 版本过旧或无法确认，需要 6.3 或更高版本才能制作安装包。",
+            detail=detail,
+        )
 
     def _prompt_missing_chinese_language(self, detail: str = ""):
         box = QMessageBox(self)
@@ -742,6 +764,9 @@ class StandaloneExportDialog(QDialog):
         if isinstance(exc, MissingInnoSetupError):
             self._prompt_install_inno_setup(str(exc))
             return
+        if isinstance(exc, OutdatedInnoSetupError):
+            self._prompt_outdated_inno_setup(str(exc))
+            return
         if isinstance(exc, MissingChineseLanguageError):
             self._prompt_missing_chinese_language(str(exc))
             return
@@ -751,8 +776,13 @@ class StandaloneExportDialog(QDialog):
         if self._is_exporting():
             return
 
-        if find_iscc() is None:
-            self._prompt_install_inno_setup()
+        try:
+            require_iscc()
+        except MissingInnoSetupError as exc:
+            self._prompt_install_inno_setup(str(exc))
+            return
+        except OutdatedInnoSetupError as exc:
+            self._prompt_outdated_inno_setup(str(exc))
             return
 
         from ui.export_parts.export_scripts import (
@@ -776,7 +806,6 @@ class StandaloneExportDialog(QDialog):
             return
         required_width, required_height = self._required_client_size()
 
-        images_dir = str(getattr(self._main, "images_dir", "") or get_images_dir("LCA"))
         catalog = self._session_catalog()
         if not catalog:
             QMessageBox.warning(self, "无法制作", "没有可导出的脚本（请先在工作区选择工作流）")
@@ -792,11 +821,19 @@ class StandaloneExportDialog(QDialog):
             entry_id=entry_id,
             ui=ui_seed,
         )
+        entry = next((item for item in export_catalog if str(item.get("id") or "") == str(entry_id)), export_catalog[0])
+        from task_workflow.workspace import resolve_runtime_resource_dirs
+
+        resource_dirs = resolve_runtime_resource_dirs(
+            dict(entry.get("workflow_data") or {}),
+            workflow_filepath=str(entry.get("filepath") or ""),
+            default_images_dir=str(getattr(self._main, "images_dir", "") or get_images_dir("LCA")),
+        )
         collection, scripts_meta = collect_multi_script_package(
             export_catalog,
             entry_id=entry_id,
-            images_dir=images_dir,
-            sounds_dir=get_sounds_dir("LCA"),
+            images_dir=str(resource_dirs.get("images_dir") or get_images_dir("LCA")),
+            sounds_dir=str(resource_dirs.get("sounds_dir") or get_sounds_dir("LCA")),
         )
         if collection.errors:
             QMessageBox.warning(

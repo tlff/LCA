@@ -61,25 +61,22 @@ def _desktop_hook_hint(hwnd: int, display: str, mouse: str, keypad: str) -> str:
 
 
 def should_probe_plugin_bind(config: Optional[Mapping] = None) -> bool:
-    values = dict(config or {})
-    if is_plugin_input_backend(values):
-        return True
-    return is_plugin_screenshot_engine(values.get("screenshot_engine"))
+    return is_plugin_input_backend(config)
 
 
 def resolve_plugin_probe_displays(config: Optional[Mapping] = None) -> tuple[str, str]:
     values = dict(config or {})
     screenshot = normalize_screenshot_engine(values.get("screenshot_engine"))
+    if not is_plugin_screenshot_engine(screenshot):
+        raise ValueError("插件执行模式必须使用插件截图引擎")
     follow = bool(values.get("plugin_input_display_follow", True))
     configured = normalize_screenshot_engine(values.get("plugin_input_display"))
-    if follow and is_plugin_screenshot_engine(screenshot):
+    if follow:
         input_display = screenshot
     elif is_plugin_screenshot_engine(configured):
         input_display = configured
-    elif is_plugin_screenshot_engine(screenshot):
-        input_display = screenshot
     else:
-        input_display = configured or "normal"
+        raise ValueError("插件键鼠缺少绑定图显")
     return screenshot, input_display
 
 
@@ -106,13 +103,17 @@ def stamp_plugin_bind_probe(window_info: Optional[dict], result: PluginBindProbe
 
 
 def _bind_params(config: Mapping) -> tuple[str, str, int]:
-    mouse = str(config.get("plugin_mouse") or "normal").strip() or "normal"
-    keypad = str(config.get("plugin_keypad") or "normal").strip() or "normal"
-    try:
-        mode = int(config.get("plugin_bind_mode") or 0)
-    except (TypeError, ValueError):
-        mode = 0
-    return mouse, keypad, mode
+    from utils.plugin.bind_modes import (
+        normalize_plugin_bind_mode,
+        normalize_plugin_keypad,
+        normalize_plugin_mouse,
+    )
+
+    return (
+        normalize_plugin_mouse(config.get("plugin_mouse")),
+        normalize_plugin_keypad(config.get("plugin_keypad")),
+        normalize_plugin_bind_mode(config.get("plugin_bind_mode")),
+    )
 
 
 def probe_plugin_window_bind(
@@ -130,12 +131,10 @@ def probe_plugin_window_bind(
         return PluginBindProbeResult(False, False, False, "无效窗口句柄")
     if not is_plugin_runtime_available():
         return PluginBindProbeResult(False, False, False, "插件运行库不可用")
+    if not is_plugin_input_backend(values):
+        return PluginBindProbeResult(False, False, False, "当前不是插件执行模式")
 
     screenshot, input_display = resolve_plugin_probe_displays(values)
-    want_capture = is_plugin_screenshot_engine(screenshot)
-    want_input = is_plugin_input_backend(values)
-    if not want_capture and not want_input:
-        return PluginBindProbeResult(True, True, True, "")
 
     try:
         wait_seconds = max(0.05, float(timeout))
@@ -145,8 +144,8 @@ def probe_plugin_window_bind(
     if not wait_for_plugin_host_cleanup(wait_seconds):
         return PluginBindProbeResult(
             False,
-            False if want_capture else True,
-            False if want_input else True,
+            False,
+            False,
             "插件宿主仍在恢复，已跳过本轮试绑；稍后运行时会按新参数自动重绑",
         )
 
@@ -157,57 +156,51 @@ def probe_plugin_window_bind(
     from utils.plugin.session import plugin_bind_extras
 
     bind_extras = plugin_bind_extras(values)
-    probe_mouse, probe_keypad, probe_mode = (
-        _bind_params(values) if want_input else ("normal", "normal", 0)
-    )
+    probe_mouse, probe_keypad, probe_mode = _bind_params(values)
 
-    if want_capture:
-        try:
-            frame = capture_window_plugin(
+    try:
+        frame = capture_window_plugin(
+            target,
+            screenshot,
+            timeout=wait_seconds,
+            bind_extras=bind_extras,
+            bind_params=(probe_mouse, probe_keypad, probe_mode),
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("插件截图试绑异常: %s", exc, exc_info=True)
+        frame = None
+    capture_ok = frame is not None
+    if not capture_ok:
+        reason = get_last_plugin_capture_failure_reason() or "未知原因"
+        parts.append(f"截图试绑失败：{reason}")
+
+    reason = ""
+    try:
+        session = get_shared_plugin_client(target)
+        input_ok = bool(
+            session.ensure_input_bind(
                 target,
-                screenshot,
+                input_display,
+                mouse=probe_mouse,
+                keypad=probe_keypad,
+                mode=probe_mode,
                 timeout=wait_seconds,
-                fallback=False,
                 bind_extras=bind_extras,
-                bind_params=(probe_mouse, probe_keypad, probe_mode),
             )
-        except Exception as exc:  # noqa: BLE001
-            logger.debug("插件截图试绑异常: %s", exc, exc_info=True)
-            frame = None
-        capture_ok = frame is not None
-        if not capture_ok:
-            reason = get_last_plugin_capture_failure_reason() or "未知原因"
-            parts.append(f"截图试绑失败：{reason}")
-
-    if want_input:
-        reason = ""
-        try:
-            session = get_shared_plugin_client(target)
-            input_ok = bool(
-                session.ensure_input_bind(
-                    target,
-                    input_display,
-                    mouse=probe_mouse,
-                    keypad=probe_keypad,
-                    mode=probe_mode,
-                    timeout=wait_seconds,
-                    fallback=False,
-                    bind_extras=bind_extras,
-                )
-            )
-            if not input_ok:
-                reason = session.last_bind_failure_text()
-        except Exception as exc:  # noqa: BLE001
-            logger.debug("插件键鼠试绑异常: %s", exc, exc_info=True)
-            input_ok = False
-            reason = f"{exc.__class__.__name__}: {exc}"
+        )
         if not input_ok:
-            parts.append(f"键鼠试绑失败：{reason or '未知原因'}")
+            reason = session.last_bind_failure_text()
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("插件键鼠试绑异常: %s", exc, exc_info=True)
+        input_ok = False
+        reason = f"{exc.__class__.__name__}: {exc}"
+    if not input_ok:
+        parts.append(f"键鼠试绑失败：{reason or '未知原因'}")
 
     ok = bool(capture_ok and input_ok)
     if not ok:
         mouse, keypad, _mode = _bind_params(values)
-        hint = _desktop_hook_hint(target, screenshot if want_capture else "", mouse if want_input else "", keypad if want_input else "")
+        hint = _desktop_hook_hint(target, screenshot, mouse, keypad)
         if hint:
             parts.append(hint)
     return PluginBindProbeResult(ok, capture_ok, input_ok, "\n".join(parts))

@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
@@ -71,6 +72,7 @@ class Win32OverlayWindow:
         self._last_present_rect = None
         self._last_frame_shape = None
         self._fallback_last_boxes = []
+        self._last_promote_ts = 0.0
         self._pen_cache = {}
         self._brush_cache = {}
         self._color_cache = {}
@@ -138,6 +140,63 @@ class Win32OverlayWindow:
                 ctypes.c_void_p, ctypes.c_uint32,
             ]
             gdi32.CreateDIBSection.restype = ctypes.c_void_p
+
+            # GDI+ 在 64 位下必须声明原型，否则指针会被截成 32 位，绘制时有时成功有时整框消失。
+            gdiplus.GdipCreateFromHDC.argtypes = [
+                ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p),
+            ]
+            gdiplus.GdipCreateFromHDC.restype = ctypes.c_int
+            gdiplus.GdipCreateBitmapFromScan0.argtypes = [
+                ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+                ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p),
+            ]
+            gdiplus.GdipCreateBitmapFromScan0.restype = ctypes.c_int
+            gdiplus.GdipGetImageGraphicsContext.argtypes = [
+                ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p),
+            ]
+            gdiplus.GdipGetImageGraphicsContext.restype = ctypes.c_int
+            gdiplus.GdipSetSmoothingMode.argtypes = [ctypes.c_void_p, ctypes.c_int]
+            gdiplus.GdipSetSmoothingMode.restype = ctypes.c_int
+            gdiplus.GdipCreatePen1.argtypes = [
+                ctypes.c_uint32, ctypes.c_float, ctypes.c_int,
+                ctypes.POINTER(ctypes.c_void_p),
+            ]
+            gdiplus.GdipCreatePen1.restype = ctypes.c_int
+            gdiplus.GdipCreateSolidFill.argtypes = [
+                ctypes.c_uint32, ctypes.POINTER(ctypes.c_void_p),
+            ]
+            gdiplus.GdipCreateSolidFill.restype = ctypes.c_int
+            gdiplus.GdipCreateFontFamilyFromName.argtypes = [
+                ctypes.c_wchar_p, ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p),
+            ]
+            gdiplus.GdipCreateFontFamilyFromName.restype = ctypes.c_int
+            gdiplus.GdipCreateFont.argtypes = [
+                ctypes.c_void_p, ctypes.c_float, ctypes.c_int, ctypes.c_int,
+                ctypes.POINTER(ctypes.c_void_p),
+            ]
+            gdiplus.GdipCreateFont.restype = ctypes.c_int
+            gdiplus.GdipDrawRectangleI.argtypes = [
+                ctypes.c_void_p, ctypes.c_void_p,
+                ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+            ]
+            gdiplus.GdipDrawRectangleI.restype = ctypes.c_int
+            gdiplus.GdipDrawString.argtypes = [
+                ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_int, ctypes.c_void_p,
+                ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p,
+            ]
+            gdiplus.GdipDrawString.restype = ctypes.c_int
+            gdiplus.GdipDeleteGraphics.argtypes = [ctypes.c_void_p]
+            gdiplus.GdipDeleteGraphics.restype = ctypes.c_int
+            gdiplus.GdipDisposeImage.argtypes = [ctypes.c_void_p]
+            gdiplus.GdipDisposeImage.restype = ctypes.c_int
+            gdiplus.GdipDeletePen.argtypes = [ctypes.c_void_p]
+            gdiplus.GdipDeletePen.restype = ctypes.c_int
+            gdiplus.GdipDeleteBrush.argtypes = [ctypes.c_void_p]
+            gdiplus.GdipDeleteBrush.restype = ctypes.c_int
+            gdiplus.GdipDeleteFont.argtypes = [ctypes.c_void_p]
+            gdiplus.GdipDeleteFont.restype = ctypes.c_int
+            gdiplus.GdipDeleteFontFamily.argtypes = [ctypes.c_void_p]
+            gdiplus.GdipDeleteFontFamily.restype = ctypes.c_int
 
             self._winapi = {"user32": user32, "gdi32": gdi32, "gdiplus": gdiplus}
         except Exception as e:
@@ -323,55 +382,93 @@ class Win32OverlayWindow:
         return brush
 
     def _draw(self, detections: List, scale_x: float, scale_y: float):
-        if not self._winapi or not self._mem_dc or not self._bits:
+        if not self._winapi or not self._mem_dc or not self._bits or not self._bitmap:
             return
 
         import ctypes
         gdiplus = self._winapi["gdiplus"]
+        gdi32 = self._winapi["gdi32"]
 
+        self._buffer_valid = False
         ctypes.memset(self._bits, 0, self._buffer_size)
 
+        # DIB 选入 DC 时不能把 scan0 交给 GDI+。先摘下来画 PARGB，UpdateLayeredWindow 才能看到不透明像素。
+        if self._old_bitmap:
+            gdi32.SelectObject(self._mem_dc, self._old_bitmap)
+
+        bitmap = ctypes.c_void_p()
         graphics = ctypes.c_void_p()
-        gdiplus.GdipCreateFromHDC(self._mem_dc, ctypes.byref(graphics))
-        gdiplus.GdipSetSmoothingMode(graphics, 4)
-
-        self._ensure_font()
-
-        class RectF(ctypes.Structure):
-            _fields_ = [
-                ("X", ctypes.c_float),
-                ("Y", ctypes.c_float),
-                ("Width", ctypes.c_float),
-                ("Height", ctypes.c_float),
-            ]
-
-        for det in detections:
-            class_name = str(det.get("class_name", ""))
-            confidence = float(det.get("confidence", 0.0) or 0.0)
-            color = self._get_color(class_name)
-            pen = self._get_pen(color)
-            brush = self._get_brush(color)
-            if not pen:
-                continue
-
-            x1 = max(0, min(int(float(det.get("x1", 0)) * scale_x), self._width - 1))
-            y1 = max(0, min(int(float(det.get("y1", 0)) * scale_y), self._height - 1))
-            x2 = max(0, min(int(float(det.get("x2", 0)) * scale_x), self._width - 1))
-            y2 = max(0, min(int(float(det.get("y2", 0)) * scale_y), self._height - 1))
-            w = max(1, x2 - x1)
-            h = max(1, y2 - y1)
-
-            gdiplus.GdipDrawRectangleI(graphics, pen, x1, y1, w, h)
-
-            if self._font and brush:
-                label = f"{class_name} {confidence:.2f}"
-                rect = RectF(float(x1), float(max(0, y1 - 16)), 220.0, 20.0)
-                gdiplus.GdipDrawString(
-                    graphics, ctypes.c_wchar_p(label), -1, self._font, ctypes.byref(rect), None, brush
+        created_bitmap = False
+        created_graphics = False
+        try:
+            status = int(
+                gdiplus.GdipCreateBitmapFromScan0(
+                    int(self._width),
+                    int(self._height),
+                    int(self._stride),
+                    0x000E200B,  # PixelFormat32bppPARGB
+                    self._bits,
+                    ctypes.byref(bitmap),
                 )
+            )
+            if status != 0 or not bitmap:
+                return
+            created_bitmap = True
 
-        gdiplus.GdipDeleteGraphics(graphics)
-        self._buffer_valid = True
+            status = int(gdiplus.GdipGetImageGraphicsContext(bitmap, ctypes.byref(graphics)))
+            if status != 0 or not graphics:
+                return
+            created_graphics = True
+
+            gdiplus.GdipSetSmoothingMode(graphics, 4)
+            self._ensure_font()
+
+            class RectF(ctypes.Structure):
+                _fields_ = [
+                    ("X", ctypes.c_float),
+                    ("Y", ctypes.c_float),
+                    ("Width", ctypes.c_float),
+                    ("Height", ctypes.c_float),
+                ]
+
+            for det in detections:
+                class_name = str(det.get("class_name", ""))
+                confidence = float(det.get("confidence", 0.0) or 0.0)
+                color = self._get_color(class_name)
+                pen = self._get_pen(color)
+                brush = self._get_brush(color)
+                if not pen:
+                    continue
+
+                x1 = max(0, min(int(float(det.get("x1", 0)) * scale_x), self._width - 1))
+                y1 = max(0, min(int(float(det.get("y1", 0)) * scale_y), self._height - 1))
+                x2 = max(0, min(int(float(det.get("x2", 0)) * scale_x), self._width - 1))
+                y2 = max(0, min(int(float(det.get("y2", 0)) * scale_y), self._height - 1))
+                w = max(1, x2 - x1)
+                h = max(1, y2 - y1)
+
+                gdiplus.GdipDrawRectangleI(graphics, pen, x1, y1, w, h)
+
+                if self._font and brush:
+                    label = f"{class_name} {confidence:.2f}"
+                    rect = RectF(float(x1), float(max(0, y1 - 16)), 220.0, 20.0)
+                    gdiplus.GdipDrawString(
+                        graphics,
+                        ctypes.c_wchar_p(label),
+                        -1,
+                        self._font,
+                        ctypes.byref(rect),
+                        None,
+                        brush,
+                    )
+
+            self._buffer_valid = True
+        finally:
+            if created_graphics and graphics:
+                gdiplus.GdipDeleteGraphics(graphics)
+            if created_bitmap and bitmap:
+                gdiplus.GdipDisposeImage(bitmap)
+            gdi32.SelectObject(self._mem_dc, self._bitmap)
 
     def _present(self, left: int, top: int, width: int, height: int) -> bool:
         if not self._winapi or not self._mem_dc or not self._hwnd_overlay:
@@ -523,15 +620,28 @@ class Win32OverlayWindow:
             if force_redraw or shape_changed or not self._buffer_valid:
                 self._draw(detections, scale_x, scale_y)
 
+            if not self._buffer_valid:
+                self._draw_fallback_gdi(hwnd, detections, scale_x, scale_y)
+                return
+
             present_rect = (client_left, client_top, client_w, client_h)
-            if force_redraw or self._last_present_rect != present_rect:
+            need_present = force_redraw or shape_changed or self._last_present_rect != present_rect
+            if need_present:
                 if self._present(client_left, client_top, client_w, client_h):
-                    self._promote_overlay_window(client_left, client_top, client_w, client_h)
-                    win32gui.ShowWindow(self._hwnd_overlay, win32con.SW_SHOWNOACTIVATE)
                     self._last_present_rect = present_rect
                     self._fallback_last_boxes = []
                 else:
                     self._draw_fallback_gdi(hwnd, detections, scale_x, scale_y)
+                    return
+
+            now = time.perf_counter()
+            if need_present or (now - self._last_promote_ts) >= 0.1:
+                self._promote_overlay_window(client_left, client_top, client_w, client_h)
+                try:
+                    win32gui.ShowWindow(self._hwnd_overlay, win32con.SW_SHOWNOACTIVATE)
+                except Exception:
+                    pass
+                self._last_promote_ts = now
         except Exception as e:
             logger.debug(f"悬浮层渲染失败：{e}")
 
@@ -545,6 +655,7 @@ class Win32OverlayWindow:
                 pass
         self._last_present_rect = None
         self._buffer_valid = False
+        self._fallback_last_boxes = []
 
     def shutdown(self):
         self.hide()

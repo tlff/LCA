@@ -348,7 +348,7 @@ def execute_task(params: Dict[str, Any], counters: Dict[str, int], execution_mod
     coordinate_text = params.get('coordinate_text')
     coordinate_mode = _normalize_coordinate_mode(params.get('coordinate_mode', '客户区坐标'))
     enable_click = coerce_bool(params.get('enable_click', True))
-    button, clicks, interval, click_action, _, hold_duration = resolve_click_params(
+    button, clicks, interval, click_action, auto_release, hold_duration = resolve_click_params(
         params,
         button_key="button",
         clicks_key="clicks",
@@ -615,7 +615,10 @@ def execute_task(params: Dict[str, Any], counters: Dict[str, int], execution_mod
             logger.info(f"[{mode_name}模式] 使用客户区坐标: ({final_x}, {final_y})")
 
         logger.info("=== 坐标处理完成 ===")
-        logger.info(f"最终点击坐标: ({final_x}, {final_y}), 模式: {effective_execution_mode}, 动作: {click_action}")
+        logger.info(
+            f"最终点击坐标: ({final_x}, {final_y}), 模式: {effective_execution_mode}, "
+            f"动作: {click_action}, 自动释放={auto_release}"
+        )
 
         # 执行点击 - 优先使用新的输入模拟模块
         force_move_before_click = True
@@ -623,6 +626,7 @@ def execute_task(params: Dict[str, Any], counters: Dict[str, int], execution_mod
             target_hwnd, final_x, final_y, button, clicks, interval,
             effective_execution_mode, click_action, hold_duration,
             move_before_click=force_move_before_click,
+            auto_release=auto_release,
         )
 
         if success:
@@ -841,9 +845,11 @@ def _perform_simulator_click(simulator, x: int, y: int, button: str, click_actio
                             require_atomic_hold: bool = False,
                             move_before_click: bool = False,
                             execution_mode: Optional[str] = None,
-                            target_hwnd: Optional[int] = None) -> bool:
+                            target_hwnd: Optional[int] = None,
+                            auto_release: bool = False) -> bool:
     logger.info(
-        f"[{mode_label}模式] 执行点击: 坐标({x}, {y}), 按钮={button}, 动作={click_action}, 次数={clicks}"
+        f"[{mode_label}模式] 执行点击: 坐标({x}, {y}), 按钮={button}, 动作={click_action}, "
+        f"次数={clicks}, 自动释放={auto_release}"
     )
     is_foreground_single_click = (
         is_foreground_mode(execution_mode)
@@ -863,7 +869,7 @@ def _perform_simulator_click(simulator, x: int, y: int, button: str, click_actio
             clicks=clicks,
             interval=interval,
             hold_duration=hold_duration,
-            auto_release=True,
+            auto_release=auto_release,
             mode_label=f"{mode_label}模式",
             logger_obj=logger,
             single_click_retry=is_foreground_mode(execution_mode),
@@ -891,7 +897,8 @@ def _perform_simulator_click(simulator, x: int, y: int, button: str, click_actio
 def _click_with_new_simulator(hwnd: int, x: int, y: int, button: str = 'left',
                              clicks: int = 1, interval: float = DEFAULT_DOUBLE_CLICK_INTERVAL_SECONDS, execution_mode: str = 'background',
                              click_action: str = '完整点击', hold_duration: float = DEFAULT_CLICK_HOLD_SECONDS,
-                             move_before_click: bool = False) -> Optional[bool]:
+                             move_before_click: bool = False,
+                             auto_release: bool = False) -> Optional[bool]:
     """
     使用输入模拟器执行点击（前台/后台统一入口）
 
@@ -903,7 +910,8 @@ def _click_with_new_simulator(hwnd: int, x: int, y: int, button: str = 'left',
         interval: 点击间隔
         execution_mode: 执行模式
         click_action: 点击动作 ('完整点击', '双击', '仅按下', '仅松开')
-        hold_duration: 仅按下时的持续时间
+        hold_duration: 仅按下且自动释放时的持续时间
+        auto_release: 仅按下时是否按时长松开；False 时只按下不松开
 
     Returns:
         bool: 是否成功
@@ -955,6 +963,7 @@ def _click_with_new_simulator(hwnd: int, x: int, y: int, button: str = 'left',
             move_before_click=move_before_click,
             execution_mode=execution_mode,
             target_hwnd=hwnd,
+            auto_release=auto_release,
         )
 
     except ImportError:
@@ -965,22 +974,3 @@ def _click_with_new_simulator(hwnd: int, x: int, y: int, button: str = 'left',
         return False
 
 # DPI修正函数已移除，Interception驱动自动处理DPI
-
-if __name__ == '__main__':
-    # 测试代码
-    logging.basicConfig(level=logging.DEBUG)
-    
-    test_params = {
-        'coordinate_x': 200,
-        'coordinate_y': 300,
-        'coordinate_mode': '客户区坐标',
-        'button': '左键',
-        'clicks': 1,
-        'interval': DEFAULT_DOUBLE_CLICK_INTERVAL_SECONDS,
-        'position_mode': '随机偏移',
-        'random_offset_x': 5,
-        'random_offset_y': 5
-    }
-    
-    result = execute_task(test_params, {}, 'foreground', None, None)
-    logger.info(f"测试结果: {result}")

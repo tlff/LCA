@@ -2,6 +2,7 @@
 
 from .parameter_panel_support import *
 from .favorites.parameter_panel_favorites_mixin import ParameterPanelFavoritesMixin
+from .ai.parameter_panel_ai_mixin import ParameterPanelAIMixin
 from .media.parameter_panel_media_mixin import ParameterPanelMediaMixin
 from .selector.parameter_panel_selector_mixin import ParameterPanelSelectorMixin
 from .recording.parameter_panel_recording_mixin import ParameterPanelRecordingMixin
@@ -19,6 +20,7 @@ from .widget.parameter_panel_widget_registry_mixin import ParameterPanelWidgetRe
 
 class ParameterPanel(
     ParameterPanelFavoritesMixin,
+    ParameterPanelAIMixin,
     ParameterPanelMediaMixin,
     ParameterPanelSelectorMixin,
     ParameterPanelRecordingMixin,

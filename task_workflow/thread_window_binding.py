@@ -2,14 +2,31 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 
 from utils.window.hwnd_utils import as_hwnd
 from task_workflow.thread_start import is_thread_start_task_type
 
 
 THREAD_WINDOW_LIMIT_TASK_TYPE = "线程窗口限制"
-THREAD_WINDOW_LIMIT_PARAM = "bound_window_index"
+THREAD_WINDOW_LIMIT_PARAM = "bound_window_id"
+
+
+def bound_window_selector_choices(windows: Any) -> List[Tuple[str, str]]:
+    from app_core.control_plane import ensure_bind_id
+
+    choices: List[Tuple[str, str]] = []
+    if not isinstance(windows, list):
+        return choices
+    for idx, window_info in enumerate(windows, 1):
+        if not isinstance(window_info, dict):
+            continue
+        bind_id = ensure_bind_id(window_info)
+        if not bind_id:
+            continue
+        title = str(window_info.get("title") or f"窗口{idx}").strip() or f"窗口{idx}"
+        choices.append((f"窗口{idx}: {title}", bind_id))
+    return choices
 
 
 def is_thread_window_limit_task_type(task_type: Any) -> bool:
@@ -184,24 +201,23 @@ def resolve_thread_window_configs(
         if not isinstance(parameters, dict):
             raise TypeError(f"线程窗口限制卡参数必须是字典: {limit_card_id}")
 
-        raw_window_index = parameters.get(THREAD_WINDOW_LIMIT_PARAM)
-        if raw_window_index is None:
+        raw_bind_id = parameters.get(THREAD_WINDOW_LIMIT_PARAM)
+        if raw_bind_id is None:
             continue
-        window_index = _require_int(
-            raw_window_index,
-            f"线程窗口序号(card={limit_card_id})",
-        )
-        if window_index <= 0:
-            raise ValueError(f"线程窗口序号必须大于0: card={limit_card_id}")
-        if window_index > len(enabled_windows):
-            raise ValueError(
-                f"线程起点 {start_id} 指定窗口{window_index}，"
-                f"但当前只有{len(enabled_windows)}个启用窗口"
-            )
+        bind_id = str(raw_bind_id).strip()
+        if not bind_id:
+            continue
 
-        selected_window = enabled_windows[window_index - 1]
+        selected_window = None
+        for window_info in enabled_windows:
+            if str(window_info.get("bind_id") or "").strip() == bind_id:
+                selected_window = window_info
+                break
+        if selected_window is None:
+            raise ValueError("指定窗口不存在或未启用")
+
         resolved[start_id] = {
-            "window_index": window_index,
+            "bind_id": bind_id,
             "target_hwnd": selected_window["hwnd"],
             "target_window_title": selected_window.get("title", "").strip(),
             "source_card_id": limit_card_id,

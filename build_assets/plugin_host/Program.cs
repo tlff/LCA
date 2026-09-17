@@ -2,6 +2,7 @@ using System;
 using System.Collections;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.ComponentModel;
 using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Imaging;
@@ -10,7 +11,6 @@ using System.IO.MemoryMappedFiles;
 using System.IO.Pipes;
 using System.Reflection;
 using System.Runtime.InteropServices;
-using System.Runtime.InteropServices.ComTypes;
 using System.Text;
 using System.Threading;
 using System.Web.Script.Serialization;
@@ -25,13 +25,18 @@ internal static class Program
     static readonly object FrameLock = new object();
     static readonly JavaScriptSerializer Json = new JavaScriptSerializer();
     const int MaxClients = 8;
+    const string ActivationMode = "registration-free";
     static readonly object InitLock = new object();
     static readonly BlockingCollection<RpcWork> ComQueue = new BlockingCollection<RpcWork>();
     static string PipeName;
     static MemoryMappedFile Map;
     static string RegCode = "";
     static string ExtraCode = "";
-    static Type DmProgType;
+    static IClassFactory DmClassFactory;
+    static IntPtr DmModule;
+    static readonly Guid DmClassId = new Guid("26037A0E-7CBD-4FFF-9C63-56F2D0770214");
+    static readonly Guid UnknownId = new Guid("00000000-0000-0000-C000-000000000046");
+    static readonly Guid ClassFactoryId = new Guid("00000001-0000-0000-C000-000000000046");
     static bool Inited;
     static volatile bool Stopping;
 
@@ -129,18 +134,20 @@ internal static class Program
         }
     }
 
-    // 查询类命令（client_size / last_error）允许回退到最近绑定或主对象。
     static DmSlot SlotFor(int hwnd)
     {
         DmSlot slot;
-        if (hwnd > 0 && Slots.TryGetValue(hwnd, out slot))
+        if (hwnd > 0)
         {
+            if (!Slots.TryGetValue(hwnd, out slot))
+                throw new InvalidOperationException("窗口 " + hwnd + " 未绑定，请先 bind");
             slot.Touch();
             return slot;
         }
         slot = LastSlot ?? Primary;
-        if (slot != null)
-            slot.Touch();
+        if (slot == null)
+            throw new InvalidOperationException("没有可用的插件对象");
+        slot.Touch();
         return slot;
     }
 
@@ -156,7 +163,7 @@ internal static class Program
         return slot;
     }
 
-    // 为窗口取一个 dm 对象：已有→复用；否则先拿空闲对象；满了淘汰最久未用的窗口；都没有才新建并 Reg。
+    // 为窗口取一个 dm 对象：已有→复用；否则先拿空闲对象；满了直接失败，不淘汰正在绑定的窗口。
     static DmSlot SlotForBind(int hwnd, out bool registered)
     {
         registered = false;
@@ -167,13 +174,10 @@ internal static class Program
             return slot;
         }
         slot = TakeFreeSlot();
-        if (slot == null && Slots.Count >= MaxSlots)
-        {
-            DetachSlot(LeastRecentlyUsedSlot());
-            slot = TakeFreeSlot();
-        }
         if (slot == null)
         {
+            if (Slots.Count >= MaxSlots)
+                throw new InvalidOperationException("插件对象池已满（最多 " + MaxSlots + " 个窗口），请先解绑其它窗口");
             slot = new DmSlot { Dm = CreateAuthorizedDm() };
             registered = true;
         }
@@ -192,17 +196,6 @@ internal static class Program
         DmSlot slot = FreeSlots[FreeSlots.Count - 1];
         FreeSlots.RemoveAt(FreeSlots.Count - 1);
         return slot;
-    }
-
-    static DmSlot LeastRecentlyUsedSlot()
-    {
-        DmSlot victim = null;
-        foreach (DmSlot candidate in Slots.Values)
-        {
-            if (victim == null || candidate.LastUsed < victim.LastUsed)
-                victim = candidate;
-        }
-        return victim;
     }
 
     // 解绑并把 dm 对象放回空闲池（不释放、不重新 Reg）。
@@ -240,12 +233,70 @@ internal static class Program
         };
     }
 
+    [ComImport]
+    [Guid("00020400-0000-0000-C000-000000000046")]
+    [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    interface IComDispatch
+    {
+        [PreserveSig]
+        int GetTypeInfoCount(out int pctinfo);
+
+        [PreserveSig]
+        int GetTypeInfo(int iTInfo, int lcid, out IntPtr info);
+
+        [PreserveSig]
+        int GetIDsOfNames(ref Guid riid, IntPtr names, int nameCount, int lcid, IntPtr dispIds);
+
+        [PreserveSig]
+        int Invoke(
+            int dispId,
+            ref Guid riid,
+            int lcid,
+            ushort flags,
+            ref DispatchParams dispParams,
+            IntPtr result,
+            IntPtr excepInfo,
+            IntPtr argErr);
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct DispatchParams
+    {
+        public IntPtr Args;
+        public IntPtr NamedArgs;
+        public int ArgCount;
+        public int NamedArgCount;
+    }
+
+    [ComImport]
+    [Guid("00000001-0000-0000-C000-000000000046")]
+    [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    interface IClassFactory
+    {
+        [PreserveSig]
+        int CreateInstance(
+            IntPtr outer,
+            ref Guid iid,
+            [MarshalAs(UnmanagedType.Interface)] out object instance);
+
+        [PreserveSig]
+        int LockServer([MarshalAs(UnmanagedType.Bool)] bool lockServer);
+    }
+
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    delegate int DllGetClassObjectDelegate(
+        ref Guid classId,
+        ref Guid interfaceId,
+        out IntPtr classFactory);
+
     static object CreateAuthorizedDm()
     {
-        if (DmProgType == null)
+        if (DmClassFactory == null)
             throw new InvalidOperationException("插件尚未初始化");
-        object dm = Activator.CreateInstance(DmProgType);
-        if (dm == null)
+        object dm;
+        Guid iid = UnknownId;
+        int hr = DmClassFactory.CreateInstance(IntPtr.Zero, ref iid, out dm);
+        if (hr < 0 || dm == null)
             throw new InvalidOperationException("无法创建 dm.dmsoft");
         try { Invoke(dm, "SetShowErrorMsg", 0); } catch (Exception) { }
         int authCode;
@@ -256,6 +307,69 @@ internal static class Program
         }
         Registrations++;
         return dm;
+    }
+
+    static string _lastVerText = "";
+
+    static bool Authorize(object dm, string regCode, string extraCode, out int authCode)
+    {
+        authCode = 0;
+        _lastVerText = "";
+        // 免注册仅指不写 COM 注册表；大漠注册码授权仍按官方 Reg 流程执行。
+        try
+        {
+            object verObj = Invoke(dm, "Ver");
+            _lastVerText = Convert.ToString(verObj) ?? "";
+        }
+        catch (Exception)
+        {
+        }
+        try
+        {
+            object reg = Invoke(dm, "Reg", regCode, extraCode ?? "");
+            authCode = ToInt(reg);
+            return authCode == 1;
+        }
+        catch (Exception)
+        {
+        }
+        return false;
+    }
+
+    static int ToInt(object value)
+    {
+        if (value == null || value is string)
+            return 0;
+        try { return Convert.ToInt32(value); }
+        catch (Exception) { return 0; }
+    }
+
+    static string AuthorizeErrorMessage(int code)
+    {
+        string detail;
+        switch (code)
+        {
+            case -2: detail = "进程未以管理员方式运行"; break;
+            case -1: detail = "无法连接大漠网络（防火墙或断网）"; break;
+            case 2: detail = "账户余额不足"; break;
+            case 3: detail = "已绑本机但余额不足 50 元"; break;
+            case 4: detail = "注册码错误"; break;
+            case 5: detail = "机器或 IP 在黑/白名单限制中"; break;
+            case 6: detail = "非法使用插件或系统语言非简体中文"; break;
+            case 7:
+            case 77: detail = "账号/机器码因非法使用被封禁"; break;
+            case 8: detail = "附加码不在白名单中"; break;
+            case -8: detail = "附加码长度超过 20"; break;
+            case -9: detail = "附加码包含非法字符"; break;
+            case 777: detail = "同一机器码注册次数超限"; break;
+            case 778:
+            case 779:
+            case 780:
+            case 781: detail = "注册失败次数异常，IP/机器被临时限制；请换网络或等一段时间后再试"; break;
+            default: detail = "未知原因"; break;
+        }
+        string verPart = string.IsNullOrEmpty(_lastVerText) ? "ver=空" : ("ver=" + _lastVerText);
+        return "插件授权失败 code=" + code + "（" + detail + "；" + verPart + "）";
     }
 
     sealed class RpcWork
@@ -270,64 +384,41 @@ internal static class Program
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     static extern bool SetDllDirectory(string lpPathName);
 
-    [DllImport("oleaut32.dll", CharSet = CharSet.Unicode, PreserveSig = true)]
-    static extern int LoadTypeLibEx(string szFile, int regkind, out ITypeLib pptlib);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    static extern IntPtr LoadLibraryW(string fileName);
 
-    [DllImport("oleaut32.dll", CharSet = CharSet.Unicode, PreserveSig = true)]
-    static extern int RegisterTypeLibForUser(ITypeLib ptlib, string szFullPath, string szHelpDir);
+    [DllImport("kernel32.dll", CharSet = CharSet.Ansi, SetLastError = true)]
+    static extern IntPtr GetProcAddress(IntPtr module, string name);
 
-    [DllImport("oleaut32.dll", CharSet = CharSet.Unicode, PreserveSig = true)]
-    static extern int RegisterTypeLib(ITypeLib ptlib, string szFullPath, string szHelpDir);
+    [DllImport("oleaut32.dll", ExactSpelling = true)]
+    static extern void VariantClear(IntPtr pvarg);
 
-    [DllImport("RegDll.dll", CharSet = CharSet.Unicode, EntryPoint = "SetDllPathW")]
-    static extern int SetDllPathW(string path, int mode);
-
-    [DllImport("user32.dll")]
-    static extern bool GetClientRect(IntPtr hWnd, out RECT lpRect);
-
-    [StructLayout(LayoutKind.Sequential)]
-    struct RECT
+    static void LoadClassFactory(string dmPath)
     {
-        public int Left;
-        public int Top;
-        public int Right;
-        public int Bottom;
-    }
-
-    static void EnsureTypeLibRegistered(string dmPath)
-    {
-        // dm.dll 自带类型库，但 DllRegisterServer 往往只写 InprocServer32。
-        // 未注册 TypeLib 时，.NET InvokeMember / IDispatch 会报 TYPE_E_LIBNOTREGISTERED，
-        // Ver/Reg 看起来像“空版本 + code=0”。
-        // ForUser 只写当前令牌的 HKCU；提权后是管理员配置单元，必须再写 HKLM。
-        const int regkindNone = 2;
-        ITypeLib tlb;
-        if (LoadTypeLibEx(dmPath, regkindNone, out tlb) != 0 || tlb == null)
+        if (DmClassFactory != null)
             return;
+        DmModule = LoadLibraryW(dmPath);
+        if (DmModule == IntPtr.Zero)
+            throw new Win32Exception(Marshal.GetLastWin32Error(), "无法加载 dm.dll");
+        IntPtr entry = GetProcAddress(DmModule, "DllGetClassObject");
+        if (entry == IntPtr.Zero)
+            throw new InvalidOperationException("dm.dll 缺少 DllGetClassObject");
+        DllGetClassObjectDelegate getClassObject =
+            (DllGetClassObjectDelegate)Marshal.GetDelegateForFunctionPointer(
+                entry, typeof(DllGetClassObjectDelegate));
+        IntPtr factoryPtr;
+        Guid classId = DmClassId;
+        Guid interfaceId = ClassFactoryId;
+        int hr = getClassObject(ref classId, ref interfaceId, out factoryPtr);
+        if (hr < 0 || factoryPtr == IntPtr.Zero)
+            throw new InvalidOperationException("无法从 dm.dll 获取 COM 类工厂，HRESULT=0x" + hr.ToString("X8"));
         try
         {
-            RegisterTypeLibForUser(tlb, dmPath, null);
-            RegisterTypeLib(tlb, dmPath, null);
+            DmClassFactory = (IClassFactory)Marshal.GetObjectForIUnknown(factoryPtr);
         }
         finally
         {
-            Marshal.ReleaseComObject(tlb);
-        }
-    }
-
-    static bool TrySetDllPathW(string pluginDir)
-    {
-        try
-        {
-            return SetDllPathW(pluginDir, 0) != 0;
-        }
-        catch (DllNotFoundException)
-        {
-            return false;
-        }
-        catch (EntryPointNotFoundException)
-        {
-            return false;
+            Marshal.Release(factoryPtr);
         }
     }
 
@@ -417,7 +508,7 @@ internal static class Program
                 work.Done.Wait();
                 object msgId = GetValue(message, "id");
                 if (work.Error != null)
-                    WriteError(pipe, msgId, SafeError(work.Error, RegCode), RegCode);
+            WriteError(pipe, msgId, SafeError(work.Error, RegCode), RegCode);
                 else
                     WriteOk(pipe, msgId, work.Result);
                 if (!work.Running)
@@ -487,47 +578,15 @@ internal static class Program
                 throw new InvalidOperationException("插件目录无效");
             if (!SetDllDirectory(pluginDir))
                 throw new InvalidOperationException("SetDllDirectory 失败");
-            TrySetDllPathW(pluginDir);
             string dmPath = Path.Combine(pluginDir, "dm.dll");
             if (!File.Exists(dmPath))
                 throw new InvalidOperationException("缺少 dm.dll: " + dmPath);
-            EnsureTypeLibRegistered(dmPath);
-            Type prog = Type.GetTypeFromProgID("dm.dmsoft");
-            if (prog == null)
-                throw new InvalidOperationException("找不到 dm.dmsoft");
-            object dm = Activator.CreateInstance(prog);
+            LoadClassFactory(dmPath);
+            object dm = CreateAuthorizedDm();
             if (dm == null)
                 throw new InvalidOperationException("无法创建 dm.dmsoft");
-            DmProgType = prog;
             // 宿主没有窗口：大漠自带的错误弹窗不可见，只会让 RPC 卡到超时，必须关掉。
             try { Invoke(dm, "SetShowErrorMsg", 0); } catch (Exception) { }
-            string verNow = "";
-            string verErr = "";
-            try
-            {
-                verNow = Convert.ToString(Invoke(dm, "Ver")) ?? "";
-            }
-            catch (Exception verEx)
-            {
-                verErr = verEx.GetType().Name + ":" + verEx.Message;
-            }
-            try
-            {
-                File.WriteAllText(
-                    Path.Combine(pluginDir, "plugin_host_auth.log"),
-                    "plugin_dir=" + pluginDir + Environment.NewLine
-                    + "prog=" + prog.FullName + Environment.NewLine
-                    + "dm_exists=" + (File.Exists(dmPath) ? "1" : "0") + Environment.NewLine
-                    + "ver_before=" + verNow + Environment.NewLine
-                    + "ver_len=" + verNow.Length + Environment.NewLine
-                    + "ver_err=" + verErr + Environment.NewLine);
-            }
-            catch (Exception)
-            {
-            }
-            int authCode;
-            if (!Authorize(dm, RegCode, extraCode, out authCode))
-                throw new InvalidOperationException(AuthorizeErrorMessage(authCode));
             Primary = new DmSlot { Dm = dm };
             Primary.Touch();
             Registrations = 1;
@@ -613,8 +672,16 @@ internal static class Program
             case "version":
                 result = CallText(Primary.Dm, "Ver");
                 return true;
+            case "activation_mode":
+                // This is deliberately exposed so the authorization probe can reject
+                // a stale host that still activates dmsoft through the COM registry.
+                result = ActivationMode;
+                return true;
             case "client_size":
                 result = DoClientSize(SlotFor(hwnd).Dm, hwnd);
+                return true;
+            case "memory_call":
+                result = DoMemoryCall(BoundSlotFor(hwnd).Dm, hwnd, args);
                 return true;
             case "last_error":
                 result = LastError(SlotFor(hwnd).Dm);
@@ -636,28 +703,45 @@ internal static class Program
     {
         bool bound = false;
         bool cached = false;
+        string error = "";
+        object raw = null;
         DmSlot slot;
         if (hwnd > 0 && Slots.TryGetValue(hwnd, out slot))
         {
             cached = slot.BindOk;
-            bound = IsBoundByDm(slot.Dm, hwnd);
-            if (!bound && slot.BindOk)
+            bool asked = TryIsBoundByDm(slot.Dm, hwnd, out bound, out raw, out error);
+            if (asked && !bound && slot.BindOk)
                 slot.ClearBind();
+            else if (!asked)
+                bound = slot.BindOk;
         }
         return new Dictionary<string, object>
         {
             { "bound", bound },
             { "cached", cached },
+            { "raw", raw == null ? "" : Convert.ToString(raw) },
+            { "error", error ?? "" },
         };
     }
 
     static bool IsBoundByDm(object dm, int hwnd)
     {
+        bool bound;
         object raw;
         string error;
+        return TryIsBoundByDm(dm, hwnd, out bound, out raw, out error) && bound;
+    }
+
+    static bool TryIsBoundByDm(object dm, int hwnd, out bool bound, out object raw, out string error)
+    {
+        bound = false;
+        raw = null;
+        error = "";
+        // 本机 dm.dll 类型库：IsBind(hwnd)。无参会 TargetParameterCountException。
         if (!TryInvoke(dm, "IsBind", out raw, out error, hwnd))
             return false;
-        return IsSuccessInt(raw);
+        bound = IsSuccessInt(raw);
+        return true;
     }
 
     static Dictionary<string, object> DoForceUnbind(int hwnd)
@@ -696,7 +780,7 @@ internal static class Program
             { "last_error", lastError },
             { "error", error ?? "" },
             { "api", api ?? "" },
-            // 本次 bind 是否为该窗口新建了 dm 对象并 Reg，以及宿主累计注册次数，供调用方记账
+            // 本次 bind 是否为该窗口新建了 dm 对象，以及宿主累计对象创建数，供调用方记账
             { "registered", registered },
             { "registrations", Registrations },
         };
@@ -797,17 +881,10 @@ internal static class Program
         if (needed > FrameMapSize)
             throw new InvalidOperationException("frame exceeds 64MiB map");
 
-        byte[] bgr = null;
         byte[] bmpBytes = GetScreenDataBmp(dm, 0, 0, width, height);
-        if (bmpBytes != null && bmpBytes.Length > 0)
-            bgr = BmpToBgr(bmpBytes, out width, out height);
-        if (bgr == null)
-        {
-            byte[] raw = GetScreenData(dm, 0, 0, width, height, width, height);
-            if (raw == null || raw.Length == 0)
-                throw new InvalidOperationException("截图为空");
-            bgr = BgraToBgr(raw, width, height);
-        }
+        if (bmpBytes == null || bmpBytes.Length == 0)
+            throw new InvalidOperationException("GetScreenDataBmp 截图为空");
+        byte[] bgr = BmpToBgr(bmpBytes, out width, out height);
         int stride = width * 3;
         WriteBgrFrame(map, bgr, width, height, stride);
         return new Dictionary<string, object>
@@ -832,6 +909,42 @@ internal static class Program
             { "width", width },
             { "height", height },
         };
+    }
+
+    static object DoMemoryCall(object dm, int hwnd, Dictionary<string, object> args)
+    {
+        string operation = GetString(args, "operation");
+        string addr = GetString(args, "addr");
+        string type = GetString(args, "type");
+        switch (operation)
+        {
+            case "module_base": return Invoke(dm, "GetModuleBaseAddr", hwnd, GetString(args, "module"));
+            case "module_size": return Invoke(dm, "GetModuleSize", hwnd, GetString(args, "module"));
+            case "read_int": return Invoke(dm, "ReadInt", hwnd, addr, GetRequiredInt(args, "type"));
+            case "read_float": return Invoke(dm, "ReadFloat", hwnd, addr);
+            case "read_double": return Invoke(dm, "ReadDouble", hwnd, addr);
+            case "read_string": return Invoke(dm, "ReadString", hwnd, addr, GetRequiredInt(args, "type"), GetRequiredInt(args, "length"));
+            case "read_data": return Invoke(dm, "ReadData", hwnd, addr, GetRequiredInt(args, "length"));
+            case "write_int": return Invoke(dm, "WriteInt", hwnd, addr, GetRequiredInt(args, "type"), GetRequiredInt(args, "value"));
+            case "write_float": return Invoke(dm, "WriteFloat", hwnd, addr, GetRequiredDouble(args, "value"));
+            case "write_double": return Invoke(dm, "WriteDouble", hwnd, addr, GetRequiredDouble(args, "value"));
+            case "write_string": return Invoke(dm, "WriteString", hwnd, addr, GetRequiredInt(args, "type"), GetString(args, "value"));
+            case "write_data": return Invoke(dm, "WriteData", hwnd, addr, GetString(args, "value"));
+            case "find_int": return Invoke(dm, "FindInt", hwnd, GetString(args, "range"), GetRequiredInt(args, "min"), GetRequiredInt(args, "max"), GetRequiredInt(args, "type"));
+            case "find_float": return Invoke(dm, "FindFloat", hwnd, GetString(args, "range"), GetRequiredDouble(args, "min"), GetRequiredDouble(args, "max"));
+            case "find_double": return Invoke(dm, "FindDouble", hwnd, GetString(args, "range"), GetRequiredDouble(args, "min"), GetRequiredDouble(args, "max"));
+            case "find_string": return Invoke(dm, "FindString", hwnd, GetString(args, "range"), GetString(args, "value"), GetRequiredInt(args, "type"));
+            case "find_data": return Invoke(dm, "FindData", hwnd, GetString(args, "range"), GetString(args, "value"));
+            case "virtual_alloc": return Invoke(dm, "VirtualAllocEx", hwnd, addr, GetRequiredInt(args, "size"), GetRequiredInt(args, "allocation_type"));
+            case "virtual_free": return Invoke(dm, "VirtualFreeEx", hwnd, addr);
+            case "free_process_memory": return Invoke(dm, "FreeProcessMemory", hwnd);
+            case "asm_add": return Invoke(dm, "AsmAdd", GetString(args, "instruction"));
+            case "asm_clear": return Invoke(dm, "AsmClear");
+            case "asm_call": return Invoke(dm, "AsmCall", hwnd, GetRequiredInt(args, "mode"));
+            case "asm_call_ex": return Invoke(dm, "AsmCallEx", hwnd, GetRequiredInt(args, "mode"), addr);
+            case "asm_timeout": return Invoke(dm, "AsmSetTimeout", GetRequiredInt(args, "timeout"), GetRequiredInt(args, "param"));
+            default: throw new InvalidOperationException("不支持的大漠内存操作: " + operation);
+        }
     }
 
     // 大漠只有 LeftDoubleClick；右键/中键没有对应接口，用两次单击按双击时序凑出来。
@@ -863,162 +976,29 @@ internal static class Program
     }
 
     // 非 ASCII 文本（中文等）走 SendString，KeyPressStr 只认按键名。
-    // ime=true 时优先 SendStringIme（需绑定时带 dx.public.input.ime），游戏类窗口通常只认这条路。
-    // 注意 SendStringIme 只有一个参数：目标窗口由该 dm 对象的绑定决定。
+    // ime=true 走 SendStringIme（需绑定时带 dx.public.input.ime）；注意该方法没有 hwnd 参数，目标由该 dm 对象的绑定决定。
     static bool DoSendString(object dm, int hwnd, string text, bool ime)
     {
         if (string.IsNullOrEmpty(text))
             return true;
         if (hwnd <= 0)
             return false;
-        if (ime && CallOk(dm, "SendStringIme", text))
-            return true;
-        if (CallOk(dm, "SendString", hwnd, text))
-            return true;
-        return CallOk(dm, "SendString2", hwnd, text);
-    }
-
-    static string _lastVerText = "";
-
-    static bool Authorize(object dm, string regCode, string extraCode, out int authCode)
-    {
-        authCode = 0;
-        _lastVerText = "";
-        // 官方顺序：先 Ver() 确认对象可用，再 Reg(注册码, 附加码)。
-        try
-        {
-            object verObj = Invoke(dm, "Ver");
-            _lastVerText = Convert.ToString(verObj) ?? "";
-        }
-        catch (Exception)
-        {
-        }
-        string verInfo = extraCode ?? "";
-        try
-        {
-            object reg = Invoke(dm, "Reg", regCode, verInfo);
-            authCode = ToInt(reg);
-            return authCode == 1;
-        }
-        catch (Exception)
-        {
-        }
-        return false;
-    }
-
-    static int ToInt(object value)
-    {
-        if (value == null || value is string)
-            return 0;
-        try
-        {
-            return Convert.ToInt32(value);
-        }
-        catch (Exception)
-        {
-            return 0;
-        }
-    }
-
-    static string AuthorizeErrorMessage(int code)
-    {
-        string detail;
-        switch (code)
-        {
-            case -2:
-                detail = "进程未以管理员方式运行";
-                break;
-            case -1:
-                detail = "无法连接大漠网络（防火墙或断网）";
-                break;
-            case 2:
-                detail = "账户余额不足";
-                break;
-            case 3:
-                detail = "已绑本机但余额不足 50 元";
-                break;
-            case 4:
-                detail = "注册码错误";
-                break;
-            case 5:
-                detail = "机器或 IP 在黑/白名单限制中";
-                break;
-            case 6:
-                detail = "非法使用插件或系统语言非简体中文";
-                break;
-            case 7:
-            case 77:
-                detail = "账号/机器码因非法使用被封禁";
-                break;
-            case 8:
-                detail = "附加码不在白名单中";
-                break;
-            case -8:
-                detail = "附加码长度超过 20";
-                break;
-            case -9:
-                detail = "附加码包含非法字符";
-                break;
-            case 777:
-                detail = "同一机器码注册次数超限";
-                break;
-            case 778:
-            case 779:
-            case 780:
-            case 781:
-                detail = "注册失败次数异常，IP/机器被临时限制；请换网络或等一段时间后再试";
-                break;
-            default:
-                detail = "未知原因";
-                break;
-        }
-        string verPart = string.IsNullOrEmpty(_lastVerText) ? "ver=空" : ("ver=" + _lastVerText);
-        return "插件授权失败 code=" + code + "（" + detail + "；" + verPart + "）";
+        if (ime)
+            return CallOk(dm, "SendStringIme", text);
+        return CallOk(dm, "SendString", hwnd, text);
     }
 
     static bool TryGetClientSize(object dm, int hwnd, out int width, out int height)
     {
         width = 0;
         height = 0;
-        try
-        {
-            object[] invokeArgs = { hwnd, 0, 0 };
-            ParameterModifier mods = new ParameterModifier(3);
-            mods[1] = true;
-            mods[2] = true;
-            object ret = dm.GetType().InvokeMember(
-                "GetClientSize",
-                BindingFlags.InvokeMethod,
-                null,
-                dm,
-                invokeArgs,
-                new[] { mods },
-                null,
-                null);
-            width = Convert.ToInt32(invokeArgs[1]);
-            height = Convert.ToInt32(invokeArgs[2]);
-            if (width > 0 && height > 0)
-                return true;
-            if (TryGetClientSizeWin32(hwnd, out width, out height))
-                return true;
-            return IsSuccessInt(ret);
-        }
-        catch (Exception)
-        {
-            return TryGetClientSizeWin32(hwnd, out width, out height);
-        }
-    }
-
-    static bool TryGetClientSizeWin32(int hwnd, out int width, out int height)
-    {
-        width = 0;
-        height = 0;
-        RECT rect;
-        if (hwnd <= 0 || !GetClientRect(new IntPtr(hwnd), out rect))
-            return false;
-        width = rect.Right - rect.Left;
-        height = rect.Bottom - rect.Top;
-        return width > 0 && height > 0;
+        object[] invokeArgs = { hwnd, 0, 0 };
+        object ret = InvokeByRef(dm, "GetClientSize", invokeArgs, new[] { false, true, true });
+        width = Convert.ToInt32(invokeArgs[1] ?? 0);
+        height = Convert.ToInt32(invokeArgs[2] ?? 0);
+        if (width > 0 && height > 0)
+            return true;
+        return IsSuccessInt(ret);
     }
 
     static byte[] GetScreenDataBmp(object dm, int x1, int y1, int x2, int y2)
@@ -1026,44 +1006,14 @@ internal static class Program
         try
         {
             object[] invokeArgs = { x1, y1, x2, y2, null, 0 };
-            ParameterModifier mods = new ParameterModifier(6);
-            mods[4] = true;
-            mods[5] = true;
-            object ret = dm.GetType().InvokeMember(
-                "GetScreenDataBmp",
-                BindingFlags.InvokeMethod,
-                null,
+            object ret = InvokeByRef(
                 dm,
+                "GetScreenDataBmp",
                 invokeArgs,
-                new[] { mods },
-                null,
-                null);
+                new[] { false, false, false, false, true, true });
             if (!IsSuccessInt(ret))
                 return null;
             return CopyOutBytes(invokeArgs[4], invokeArgs[5]);
-        }
-        catch (Exception)
-        {
-            return null;
-        }
-    }
-
-    static byte[] GetScreenData(object dm, int x1, int y1, int x2, int y2, int width, int height)
-    {
-        try
-        {
-            object ret = Invoke(dm, "GetScreenData", x1, y1, x2, y2);
-            int nbytes = width * height * 4;
-            if (nbytes <= 0)
-                return null;
-            if (ret is byte[] arr)
-                return arr;
-            IntPtr ptr = ToIntPtr(ret);
-            if (ptr == IntPtr.Zero)
-                return null;
-            byte[] data = new byte[nbytes];
-            Marshal.Copy(ptr, data, 0, nbytes);
-            return data;
         }
         catch (Exception)
         {
@@ -1131,27 +1081,6 @@ internal static class Program
         {
             if (owned != null)
                 owned.Dispose();
-        }
-        return dest;
-    }
-
-    static byte[] BgraToBgr(byte[] bgra, int width, int height)
-    {
-        int stride = width * 3;
-        int srcStride = width * 4;
-        if (bgra.Length < srcStride * height)
-            throw new InvalidOperationException("GetScreenData 长度不足");
-        byte[] dest = new byte[stride * height];
-        for (int y = 0; y < height; y++)
-        {
-            int srcRow = y * srcStride;
-            int dstRow = y * stride;
-            for (int x = 0; x < width; x++)
-            {
-                dest[dstRow + x * 3] = bgra[srcRow + x * 4];
-                dest[dstRow + x * 3 + 1] = bgra[srcRow + x * 4 + 1];
-                dest[dstRow + x * 3 + 2] = bgra[srcRow + x * 4 + 2];
-            }
         }
         return dest;
     }
@@ -1278,14 +1207,6 @@ internal static class Program
         }
     }
 
-    static bool IsVersionString(object value)
-    {
-        string text = value as string;
-        if (string.IsNullOrEmpty(text))
-            return false;
-        return text.IndexOf('.') >= 0 || char.IsDigit(text[0]);
-    }
-
     static bool IsSuccessInt(object value)
     {
         if (value == null || value is string)
@@ -1306,11 +1227,6 @@ internal static class Program
         return value == null ? "" : Convert.ToString(value);
     }
 
-    static bool CallFlag(object dm, string name, params object[] invokeArgs)
-    {
-        return IsSuccessInt(Invoke(dm, name, invokeArgs));
-    }
-
     static object Invoke(object target, string name, params object[] invokeArgs)
     {
         return target.GetType().InvokeMember(
@@ -1319,6 +1235,134 @@ internal static class Program
             null,
             target,
             invokeArgs ?? new object[0]);
+    }
+
+    const int VariantSize = 16;
+    const ushort VtVariant = 12;
+    const ushort VtByRef = 0x4000;
+    const ushort DispatchMethod = 1;
+
+    static void ZeroMemory(IntPtr pointer, int size)
+    {
+        for (int i = 0; i < size; i++)
+            Marshal.WriteByte(pointer, i, 0);
+    }
+
+    static int GetDispId(IComDispatch dispatch, string name)
+    {
+        Guid iid = Guid.Empty;
+        IntPtr namePtr = Marshal.StringToCoTaskMemUni(name);
+        IntPtr names = Marshal.AllocCoTaskMem(IntPtr.Size);
+        IntPtr ids = Marshal.AllocCoTaskMem(4);
+        try
+        {
+            Marshal.WriteIntPtr(names, namePtr);
+            int hr = dispatch.GetIDsOfNames(ref iid, names, 1, 0x0400, ids);
+            if (hr < 0)
+                throw new InvalidOperationException("找不到插件方法 " + name + " HRESULT=0x" + hr.ToString("X8"));
+            return Marshal.ReadInt32(ids);
+        }
+        finally
+        {
+            Marshal.FreeCoTaskMem(namePtr);
+            Marshal.FreeCoTaskMem(names);
+            Marshal.FreeCoTaskMem(ids);
+        }
+    }
+
+    // 大漠 GetClientSize / GetScreenDataBmp 的出参是变参。Type.InvokeMember + ParameterModifier
+    // 对 IDispatch 不会把值写回 args，必须按 VT_BYREF 调 IDispatch.Invoke。
+    static object InvokeByRef(object target, string name, object[] args, bool[] byref)
+    {
+        if (target == null)
+            throw new InvalidOperationException("插件对象为空");
+        if (args == null)
+            args = new object[0];
+        if (byref == null || byref.Length != args.Length)
+            throw new InvalidOperationException("变参标记长度与参数不一致");
+        IComDispatch dispatch = target as IComDispatch;
+        if (dispatch == null)
+            throw new InvalidOperationException("插件对象不支持 IDispatch");
+
+        int dispId = GetDispId(dispatch, name);
+        int count = args.Length;
+        IntPtr argVars = IntPtr.Zero;
+        IntPtr resultVar = Marshal.AllocHGlobal(VariantSize);
+        ZeroMemory(resultVar, VariantSize);
+        IntPtr[] varStores = count > 0 ? new IntPtr[count] : null;
+        try
+        {
+            if (count > 0)
+            {
+                argVars = Marshal.AllocHGlobal(VariantSize * count);
+                ZeroMemory(argVars, VariantSize * count);
+                for (int i = 0; i < count; i++)
+                {
+                    int src = count - 1 - i;
+                    IntPtr slot = IntPtr.Add(argVars, i * VariantSize);
+                    if (!byref[src])
+                    {
+                        Marshal.GetNativeVariantForObject(args[src], slot);
+                        continue;
+                    }
+                    // IDispatch 晚绑定的变参一律是 VARIANT*，不能直接传 LONG*。
+                    IntPtr inner = Marshal.AllocHGlobal(VariantSize);
+                    varStores[src] = inner;
+                    ZeroMemory(inner, VariantSize);
+                    if (args[src] != null)
+                        Marshal.GetNativeVariantForObject(args[src], inner);
+                    Marshal.WriteInt16(slot, 0, unchecked((short)(VtVariant | VtByRef)));
+                    Marshal.WriteIntPtr(slot, 8, inner);
+                }
+            }
+
+            DispatchParams dispParams = new DispatchParams();
+            dispParams.Args = argVars;
+            dispParams.NamedArgs = IntPtr.Zero;
+            dispParams.ArgCount = count;
+            dispParams.NamedArgCount = 0;
+            Guid iid = Guid.Empty;
+            int hr = dispatch.Invoke(
+                dispId,
+                ref iid,
+                0x0400,
+                DispatchMethod | 2,
+                ref dispParams,
+                resultVar,
+                IntPtr.Zero,
+                IntPtr.Zero);
+            if (hr < 0)
+                throw new InvalidOperationException(name + " 调用失败 HRESULT=0x" + hr.ToString("X8"));
+
+            for (int src = 0; src < count; src++)
+            {
+                if (byref[src] && varStores[src] != IntPtr.Zero)
+                    args[src] = Marshal.GetObjectForNativeVariant(varStores[src]);
+            }
+            return Marshal.GetObjectForNativeVariant(resultVar);
+        }
+        finally
+        {
+            if (argVars != IntPtr.Zero)
+            {
+                for (int i = 0; i < count; i++)
+                    VariantClear(IntPtr.Add(argVars, i * VariantSize));
+                Marshal.FreeHGlobal(argVars);
+            }
+            if (varStores != null)
+            {
+                for (int i = 0; i < varStores.Length; i++)
+                {
+                    if (varStores[i] != IntPtr.Zero)
+                    {
+                        VariantClear(varStores[i]);
+                        Marshal.FreeHGlobal(varStores[i]);
+                    }
+                }
+            }
+            VariantClear(resultVar);
+            Marshal.FreeHGlobal(resultVar);
+        }
     }
 
     static bool CallOk(object dm, string name, params object[] invokeArgs)
@@ -1480,6 +1524,24 @@ internal static class Program
         }
     }
 
+    static int GetRequiredInt(Dictionary<string, object> map, string key)
+    {
+        object value = GetValue(map, key);
+        if (value == null || value is DBNull)
+            throw new InvalidOperationException("缺少整数参数: " + key);
+        try { return Convert.ToInt32(value); }
+        catch (Exception ex) { throw new InvalidOperationException("整数参数无效: " + key, ex); }
+    }
+
+    static double GetRequiredDouble(Dictionary<string, object> map, string key)
+    {
+        object value = GetValue(map, key);
+        if (value == null || value is DBNull)
+            throw new InvalidOperationException("缺少小数参数: " + key);
+        try { return Convert.ToDouble(value); }
+        catch (Exception ex) { throw new InvalidOperationException("小数参数无效: " + key, ex); }
+    }
+
     static bool GetBool(Dictionary<string, object> map, string key, bool fallback = false)
     {
         object value = GetValue(map, key);
@@ -1496,21 +1558,6 @@ internal static class Program
         if (text == "false" || text == "0" || text == "no" || text == "off")
             return false;
         return fallback;
-    }
-
-    static double GetDouble(Dictionary<string, object> map, string key, double fallback)
-    {
-        object value = GetValue(map, key);
-        if (value == null || value is DBNull || value is string && string.IsNullOrWhiteSpace((string)value))
-            return fallback;
-        try
-        {
-            return Convert.ToDouble(value);
-        }
-        catch (Exception)
-        {
-            return fallback;
-        }
     }
 
 }

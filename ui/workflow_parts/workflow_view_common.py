@@ -1,7 +1,7 @@
 from typing import Optional, Any, Dict, List # Import Dict for type hinting
 
 from .workflow_debug_utils import debug_print
-from PySide6.QtWidgets import QGraphicsView, QGraphicsScene, QApplication, QPushButton, QVBoxLayout, QWidget, QGraphicsLineItem, QMenu, QInputDialog, QMessageBox, QDialog, QFileDialog, QGraphicsEllipseItem, QComboBox, QFrame, QGraphicsItem # Removed QResizeEvent, QShowEvent
+from PySide6.QtWidgets import QGraphicsView, QGraphicsScene, QApplication, QPushButton, QVBoxLayout, QWidget, QGraphicsLineItem, QGraphicsPathItem, QMenu, QInputDialog, QMessageBox, QDialog, QFileDialog, QGraphicsEllipseItem, QComboBox, QFrame, QGraphicsItem # Removed QResizeEvent, QShowEvent
 from PySide6.QtCore import Qt, QRectF, QPointF, Signal, QLineF, QTimer # <<< ADDED QTimer
 from PySide6.QtGui import QPainter, QWheelEvent, QColor, QBrush, QMouseEvent, QPen, QAction, QTransform, QResizeEvent, QShowEvent, QCursor, QPixmapCache # <<< ADDED QResizeEvent, QShowEvent HERE
 import os
@@ -27,8 +27,12 @@ logger = logging.getLogger(__name__) # <<< ADDED: Define module-level logger
 from ui.widgets.no_wheel_spinbox import NoWheelDoubleSpinBox, NoWheelSpinBox  # noqa: E402,F401
 
 
-class TempConnectionLine(QGraphicsLineItem):
+class TempConnectionLine(QGraphicsPathItem):
     """Temporary drag line with local antialiasing to reduce jagged edges."""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setBrush(Qt.BrushStyle.NoBrush)
+
     def paint(self, painter, option, widget=None):
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)

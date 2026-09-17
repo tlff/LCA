@@ -6,7 +6,6 @@ from __future__ import annotations
 import argparse
 import datetime
 import hashlib
-import json
 import logging
 import os
 import select
@@ -280,7 +279,7 @@ def _load_memory_workflow(memory_uri: str) -> Dict[str, Any]:
     ensure_player_image_memory()
     workflow_data = get_player_memory_json(memory_uri)
     if not isinstance(workflow_data, dict):
-        raise FileNotFoundError("workflow reference not found")
+        raise FileNotFoundError("工作流引用不存在")
     return workflow_data
 
 
@@ -294,21 +293,40 @@ def _materialize_workflow_reference(payload: Dict[str, Any]) -> Dict[str, Any]:
     path = os.path.abspath(str(reference.get("path") or ""))
     expected_hash = str(reference.get("sha256") or "").strip().lower()
     if not path or not os.path.isfile(path):
-        raise FileNotFoundError("workflow reference not found")
+        raise FileNotFoundError("工作流引用不存在")
     actual_hash = _sha256_file(path)
     if not expected_hash or actual_hash != expected_hash:
-        raise ValueError("workflow reference hash mismatch")
-    with open(path, "r", encoding="utf-8") as stream:
-        workflow_data = json.load(stream)
+        raise ValueError("工作流引用哈希不一致")
+    from task_workflow.workflow_payload import load_workflow_file
+
+    workflow_data = load_workflow_file(path)
     if not isinstance(workflow_data, dict):
-        raise ValueError("workflow reference format invalid")
+        raise ValueError("工作流引用格式无效")
     return _attach_workflow_graph(payload, workflow_data)
 
 
+def _attach_payload_lca_session(payload: Dict[str, Any]) -> None:
+    filepath = str(payload.get("workflow_filepath") or "").strip()
+    if not filepath:
+        return
+    from app_core.lca_format.project_io import ensure_registered_lca_session, is_lca_path
+    from app_core.lca_format.session import activate
+
+    if not is_lca_path(filepath):
+        return
+    session = ensure_registered_lca_session(filepath)
+    if session is None:
+        raise FileNotFoundError(f"LCA 工程不存在: {filepath}")
+    activate(filepath)
+
+
 def _create_executor(payload: Dict[str, Any]):
+    from task_workflow.resource_context import bind_resource_dirs
     from task_workflow.runtime_factory import create_inprocess_runtime
 
     payload = _materialize_workflow_reference(payload)
+    _attach_payload_lca_session(payload)
+    bind_resource_dirs(payload)
     return create_inprocess_runtime(payload)
 
 

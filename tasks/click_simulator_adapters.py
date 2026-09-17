@@ -3,18 +3,24 @@
 点击执行适配器
 将不同输入后端适配为 click_action_executor 所需接口：
 - click(x, y, button, clicks, interval)
+- double_click(x, y, button, interval, hold_duration)
 - mouse_down(x, y, button)
 - mouse_up(x, y, button)
 """
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Optional
+
+from utils.input.input_timing import (
+    DEFAULT_CLICK_HOLD_SECONDS,
+    DEFAULT_DOUBLE_CLICK_INTERVAL_SECONDS,
+)
 
 
 
 class ForegroundDriverSimulatorAdapter:
-    """前台驱动适配器（click_mouse/mouse_down/mouse_up）。"""
+    """前台驱动适配器（click_mouse/mouse_down/mouse_up/double_click）。"""
     supports_atomic_click_hold = True
 
     def __init__(self, driver: Any):
@@ -48,6 +54,57 @@ class ForegroundDriverSimulatorAdapter:
                 clicks=int(clicks),
                 interval=float(interval),
                 duration=safe_duration,
+            )
+        )
+
+    def double_click(
+        self,
+        x: int,
+        y: int,
+        button: str = "left",
+        interval: Optional[float] = None,
+        hold_duration: Optional[float] = None,
+    ) -> bool:
+        native = getattr(self._driver, "double_click", None)
+        if callable(native):
+            try:
+                return bool(
+                    native(
+                        int(x),
+                        int(y),
+                        button=button,
+                        interval=interval,
+                        hold_duration=hold_duration,
+                    )
+                )
+            except TypeError:
+                return bool(native(int(x), int(y), button))
+        if not hasattr(self._driver, "click_mouse"):
+            raise AttributeError("驱动不支持click_mouse方法")
+        try:
+            safe_interval = (
+                DEFAULT_DOUBLE_CLICK_INTERVAL_SECONDS
+                if interval is None
+                else max(0.0, float(interval))
+            )
+        except Exception:
+            safe_interval = DEFAULT_DOUBLE_CLICK_INTERVAL_SECONDS
+        try:
+            safe_hold = (
+                DEFAULT_CLICK_HOLD_SECONDS
+                if hold_duration is None
+                else max(0.0, float(hold_duration))
+            )
+        except Exception:
+            safe_hold = DEFAULT_CLICK_HOLD_SECONDS
+        return bool(
+            self._driver.click_mouse(
+                x=int(x),
+                y=int(y),
+                button=button,
+                clicks=2,
+                interval=safe_interval,
+                duration=safe_hold,
             )
         )
 

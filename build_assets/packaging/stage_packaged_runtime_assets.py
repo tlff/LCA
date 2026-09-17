@@ -15,13 +15,18 @@ if str(PROJECT_ROOT_FOR_IMPORTS) not in sys.path:
 
 from services.ocr_runtime_contract import OCR_REQUIRED_RUNTIME_DLLS
 
-# 发行包只带这四个；xx.dat 为大漠附属，缺则跳过。其它文件一律不进包。
-PLUGIN_PACK_FILES = ("PluginHost.exe", "dm.dll", "RegDll.dll", "xx.dat")
+# 三个核心运行文件缺一不可；xx.dat 是可选附属文件。其它文件一律不进包。
+PLUGIN_REQUIRED_FILES = ("PluginHost.exe", "dm.dll", "RegDll.dll")
+PLUGIN_OPTIONAL_FILES = ("xx.dat",)
+PLUGIN_PACK_FILES = PLUGIN_REQUIRED_FILES + PLUGIN_OPTIONAL_FILES
 
 
 def iter_plugin_pack_files(plugin_dir: Path):
     if not plugin_dir.is_dir():
-        return
+        raise FileNotFoundError(f"缺少插件运行目录: {plugin_dir}")
+    missing = [name for name in PLUGIN_REQUIRED_FILES if not (plugin_dir / name).is_file()]
+    if missing:
+        raise FileNotFoundError(f"插件运行目录缺少必需文件: {', '.join(missing)}")
     for name in PLUGIN_PACK_FILES:
         item = plugin_dir / name
         if item.is_file():
@@ -145,19 +150,9 @@ def _stage_interception_files(project_root: Path, dist_root: Path) -> None:
 
 
 def _stage_plugin_runtime(project_root: Path, dist_root: Path) -> None:
-    """拷贝 PluginHost 运行文件。缺目录则跳过，不中断打包。
-
-    只拷 PLUGIN_PACK_FILES；发行目录里其它残留（含 .py、调试 dll）一律清掉。
-    """
+    """拷贝必需的 PluginHost 运行文件并清除白名单外残留。"""
     source = project_root / "tools" / "plugin"
     target = dist_root / "tools" / "plugin"
-    if not source.is_dir():
-        print("[5.55/6] Skip plugin runtime: tools/plugin is missing")
-        if target.is_dir():
-            for leftover in target.rglob("*.py"):
-                if leftover.is_file():
-                    leftover.unlink()
-        return
     target.mkdir(parents=True, exist_ok=True)
     copied = 0
     keep = set()

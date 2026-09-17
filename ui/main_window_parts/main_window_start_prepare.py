@@ -139,6 +139,7 @@ def save_main_window_tasks_before_start(ctx, all_tasks, resolve_current_canvas_t
         if task.save_and_backup(workflow_data=latest_workflow_data):
             saved_count += 1
             self._sync_favorite_path_after_save(old_filepath, task)
+            self._sync_saved_task_resources(task, latest_workflow_data)
             self.workflow_tab_widget._update_tab_status(task.task_id)
         else:
             backup_failed_tasks.append(task.name)

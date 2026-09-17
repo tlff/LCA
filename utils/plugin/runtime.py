@@ -12,7 +12,7 @@ import time
 from ctypes import wintypes
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Optional
 
 from utils.app_paths import get_app_root
 from utils.plugin.bind_errors import BindOutcome
@@ -222,35 +222,26 @@ def should_cool_down() -> bool:
         return time.monotonic() < _COOLDOWN_UNTIL
 
 
-class LoopbackTransport:
-    def __init__(self, handler: Callable[[dict], dict]):
-        self._handler = handler
-
-    def request(self, payload: dict) -> dict:
-        return dict(self._handler(payload))
-
-
 class NamedFrameLock:
     """跨进程互斥：帧共享内存只有一块，主进程和附着的子进程 capture→读帧必须成对进行。"""
 
     def __init__(self, name: str, timeout: float = 5.0):
         self._name = str(name)
         self._timeout_ms = max(50, int(float(timeout) * 1000))
-        self._handle = None
-        self._fallback = threading.RLock()
         try:
             import win32event
-
-            self._win32event = win32event
-            self._handle = win32event.CreateMutex(None, False, self._name)
-        except Exception:
-            self._win32event = None
-            self._handle = None
+        except Exception as exc:
+            raise RuntimeError(f"无法加载插件帧锁: {exc}") from exc
+        try:
+            handle = win32event.CreateMutex(None, False, self._name)
+        except Exception as exc:
+            raise RuntimeError(f"无法创建插件帧锁: {exc}") from exc
+        if not handle:
+            raise RuntimeError("无法创建插件帧锁")
+        self._win32event = win32event
+        self._handle = handle
 
     def __enter__(self):
-        if self._handle is None:
-            self._fallback.acquire()
-            return self
         import pywintypes  # noqa: F401 — 确保 win32 异常类型已加载
 
         rc = self._win32event.WaitForSingleObject(self._handle, self._timeout_ms)
@@ -259,9 +250,6 @@ class NamedFrameLock:
         return self
 
     def __exit__(self, exc_type, exc, tb) -> None:
-        if self._handle is None:
-            self._fallback.release()
-            return
         try:
             self._win32event.ReleaseMutex(self._handle)
         except Exception:
@@ -442,6 +430,21 @@ class PluginClient:
         if isinstance(result, dict):
             return int(result.get("width") or 0), int(result.get("height") or 0)
         return (0, 0)
+
+    def memory_call(self, operation: str, hwnd: int, **arguments: Any) -> Any:
+        """调用宿主白名单中的大漠内存操作。operation 由上层固定方法提供。"""
+        allowed = {
+            "module_base", "module_size", "read_int", "read_float", "read_double",
+            "read_string", "read_data", "write_int", "write_float", "write_double",
+            "write_string", "write_data", "find_int", "find_float", "find_double",
+            "find_string", "find_data", "virtual_alloc", "virtual_free",
+            "free_process_memory", "asm_add", "asm_clear", "asm_call",
+            "asm_call_ex", "asm_timeout",
+        }
+        name = str(operation or "").strip()
+        if name not in allowed:
+            raise ValueError(f"不支持的大漠内存操作: {name}")
+        return self._rpc.call("memory_call", operation=name, hwnd=int(hwnd), **arguments)
 
     def last_error(self, hwnd: int = 0) -> int:
         try:
@@ -709,7 +712,7 @@ def invalidate_plugin_rpc_connection() -> None:
 
 def _teardown_host_locked() -> None:
     global _HOST_PROC, _JOB_HANDLE, _OWNS_HOST, _OWNER_PID, _ATTACHED_HOST_PID
-    attached = int(_ATTACHED_HOST_PID or 0)
+    owned = bool(_OWNS_HOST)
     _release_local_rpc_locked()
     job = _JOB_HANDLE
     _JOB_HANDLE = None
@@ -730,8 +733,10 @@ def _teardown_host_locked() -> None:
             proc.wait(timeout=2)
         except Exception:
             pass
-    elif attached > 0:
-        _kill_pid(attached)
+    # 附加进程只拥有自己的管道和映射，不能终止 owner 创建并由其它执行进程
+    # 共用的宿主。只有实际持有 _HOST_PROC 的 owner 才负责结束 PluginHost。
+    elif owned:
+        logger.warning("插件宿主标记为本进程所有，但缺少进程句柄")
     _OWNS_HOST = False
     _OWNER_PID = 0
     _ATTACHED_HOST_PID = 0
@@ -944,7 +949,7 @@ def probe_plugin_authorization(
     *,
     timeout: float = PLUGIN_AUTH_PROBE_TIMEOUT,
 ) -> AuthProbeResult:
-    """用一个临时宿主验证注册码/附加码：init（Ver + Reg）成功即为通过，随后立刻关闭。
+    """用一个临时宿主验证注册码/附加码：免注册加载 + Ver + Reg 成功即为通过，随后立刻关闭。
 
     不触碰共享宿主与冷却计数，设置页可以随时点、重复点。
     """
@@ -981,6 +986,12 @@ def probe_plugin_authorization(
             reg_code=code,
             extra_code=str(extra_code or ""),
         )
+        activation_mode = str(_call_rpc_with_timeout(rpc, 2.0, "activation_mode") or "").strip().lower()
+        if activation_mode != "registration-free":
+            raise RuntimeError(
+                "插件宿主未使用免注册加载（activation_mode=%s）；请更新 tools/plugin/PluginHost.exe"
+                % (activation_mode or "unknown")
+            )
         version = ""
         try:
             version = str(_call_rpc_with_timeout(rpc, 3.0, "version") or "")
@@ -991,7 +1002,7 @@ def probe_plugin_authorization(
         except Exception:
             pass
         suffix = f"，dm 版本 {version}" if version else ""
-        return AuthProbeResult(True, f"授权通过{suffix}", version)
+        return AuthProbeResult(True, f"授权通过（免注册加载，Ver + Reg{suffix}）", version)
     except Exception as exc:
         return AuthProbeResult(False, str(exc) or exc.__class__.__name__)
     finally:

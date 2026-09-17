@@ -501,6 +501,8 @@ class WorkflowViewDeleteEditMixin:
                 if deleted_is_start_card:
                     self._refresh_thread_start_custom_names()
                 debug_print("  Sequence display updated")
+                if not self._loading_workflow:
+                    self.reroute_connections()
             logger.debug("[DELETE] 序列显示更新完成")
 
             debug_print("  [CLEANUP] 跳过手动垃圾回收（由Qt管理）")

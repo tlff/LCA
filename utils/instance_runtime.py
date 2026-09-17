@@ -413,9 +413,9 @@ def _resolve_instances_dir(instances_dir: Optional[str] = None) -> str:
         return instances_dir
     if _INSTANCES_DIR_OVERRIDE:
         return _INSTANCES_DIR_OVERRIDE
-    from utils.app_paths import get_app_root
+    from utils.app_paths import get_user_data_dir
 
-    return os.path.join(get_app_root(), "runtime", "instances")
+    return os.path.join(get_user_data_dir("LCA"), "runtime", "instances")
 
 
 def _lock_path(directory: str, slot: int) -> str:
@@ -518,9 +518,9 @@ def _update_lock_record(
 def _seed_instance_config(slot: int) -> None:
     if slot <= 1:
         return
-    from utils.app_paths import get_app_root
+    from utils.app_paths import get_user_data_dir
 
-    root = get_app_root()
+    root = get_user_data_dir("LCA")
     primary = os.path.join(root, "config.json")
     dest = os.path.join(root, f"config.instance-{slot}.json")
     if os.path.exists(dest) or not os.path.exists(primary):

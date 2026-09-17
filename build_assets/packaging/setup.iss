@@ -18,6 +18,10 @@
   #define MyOutputDir "release_output"
 #endif
 
+#ifndef MyReleaseDate
+  #define MyReleaseDate GetDateTimeString('m.d', '', '')
+#endif
+
 [Setup]
 AppId={#emit '{{' + MyAppId + '}'}
 AppName={#MyAppDisplayName}
@@ -29,7 +33,7 @@ DefaultGroupName={#MyAppDisplayName}
 DisableDirPage=no
 AllowNoIcons=yes
 OutputDir={#MyOutputDir}
-OutputBaseFilename=LCA_测试版_Setup
+OutputBaseFilename=LCA_{#MyReleaseDate}{#MyAppEdition}_Setup
 
 ; 压缩优化
 Compression=lzma2/ultra64

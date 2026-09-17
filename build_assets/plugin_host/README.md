@@ -4,6 +4,10 @@ dm.dll 只有 32 位 COM 实现，所以由这个独立的 x86 进程加载它�
 帧数据走 64MiB 共享内存。运行时文件固定放在安装目录 `tools/plugin/`：
 `PluginHost.exe`、`dm.dll`、`RegDll.dll`（免注册加载）以及厂商附带的 `xx.dat`。
 
+宿主通过 `dm.dll` 导出的 `DllGetClassObject` 直接创建 `dmsoft`，不写 COM 注册表；
+`RegDll.dll` 仅随包提供给插件运行环境，不调用 `DllRegisterServer` 或其它注册入口；
+创建对象后仍按官方流程调用 `dm.Ver` 和 `dm.Reg(注册码, 附加码)` 验证授权。
+
 ## 构建
 
 有 .NET SDK 时（推荐，产物带完整的目标框架信息）：
@@ -23,8 +27,7 @@ set FW=C:\Windows\Microsoft.NET\Framework\v4.0.30319
   -r:System.Runtime.Serialization.dll build_assets\plugin_host\Program.cs
 ```
 
-构建后可用 `python -m pytest tests/utils/plugin/test_host_command.py` 做源码契约检查；
-`tools/plugin/PluginHost.prev.exe` 是上一版宿主，出问题时改名回退即可。
+构建后可用 `venv\Scripts\python.exe -m pytest tests/test_plugin_compat.py -q` 检查绑定契约。
 
 ## RPC 方法
 
@@ -34,15 +37,18 @@ keypad / mode，可选 `public`（BindWindowEx 的 public 串，如 `dx.public.i
 `is_bind`（向大漠核实窗口是否仍绑定）、`fake_active`（EnableFakeActive 开关）、
 `capture`、`client_size`、`move_to`、`mouse_click|mouse_double_click|mouse_down|mouse_up`、`wheel`（格数）、
 `key_down|key_up|key_press`、`key_press_str`（按键名/ASCII）、`send_string`（`hwnd` 选对象、`target` 为收字窗口；
-`ime=true` 时先 SendStringIme，再 SendString→SendString2）、`version`（dm.Ver）、`last_error`、`host_pid`、
-`stats`（`{slots,free,registrations,max_slots}`）、`shutdown`。
+`ime=true` 走 SendStringIme，否则走 SendString）、`version`（dm.Ver）、`last_error`、`host_pid`、
+`memory_call`（仅接受宿主白名单中的模块、读取、写入、搜索、远程内存和汇编操作；由自定义脚本的
+`大漠内存.*`、`大漠汇编.*` 独立命名空间调用）、
+`stats`（`{slots,free,registrations,max_slots}`）、`activation_mode`（固定返回 `registration-free`）、`shutdown`。
 
 ## 多窗口与注册次数
 
 大漠一个 dm 对象只能绑一个窗口。宿主按 `display_hwnd` 给每个窗口一个 dm 对象，所有带 `hwnd` 的命令路由到对应对象；
-动作类命令（键鼠 / 截图 / 发字 / 假激活）带了未绑定的 `hwnd` 直接报错"窗口 X 未绑定"，不会落到别的窗口的对象上，
-只有 `client_size` / `last_error` 和不带 `hwnd` 的调用才回退到最近绑定的对象。同一窗口重复 bind 且参数一致时直接复用，
-但会先用 `IsBind` 核实（目标窗口重建后绑定会静默失效）。`UnBindWindow` 返回 0 时用 `ForceUnBindWindow` 兜底释放资源。
+动作类命令（键鼠 / 截图 / 发字 / 假激活）带了未绑定的 `hwnd` 直接报错"窗口 X 未绑定"。
+`client_size` / `last_error` 指定了 `hwnd` 同样必须已绑定；不带 `hwnd` 才用最近绑定的对象。
+同一窗口重复 bind 且参数一致时直接复用，但会先用 `IsBind` 核实（目标窗口重建后绑定会静默失效）。
+对象池满（16）时新窗口 bind 失败，不会淘汰已绑定窗口。`UnBindWindow` 返回 0 时用 `ForceUnBindWindow` 释放钩子。
 
 同一窗口的截图与键鼠共用一次绑定：Python 侧键鼠绑定沿用截图的 display（不再把 dx / opengl 降成 normal），
 否则每次截图↔键鼠交替都会解绑重绑。

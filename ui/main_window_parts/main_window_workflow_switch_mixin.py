@@ -43,6 +43,31 @@ class MainWindowWorkflowSwitchMixin:
             self.workflow_view.card_added.connect(self._on_card_added)
             self.workflow_view.setProperty("_mw_card_added_connected", True)
         self._connect_parameter_panel_signals()
+        self._bind_current_workflow_resource_dirs()
+
+    def _bind_current_workflow_resource_dirs(self, task=None) -> None:
+        from task_workflow.resource_context import bind_resource_dirs, resource_dirs_from_mapping
+
+        current_task = task
+        if current_task is None and getattr(self, "workflow_tab_widget", None):
+            task_id = self.workflow_tab_widget.get_current_task_id()
+            manager = getattr(self.workflow_tab_widget, "task_manager", None)
+            if manager is not None and task_id is not None:
+                current_task = manager.get_task(task_id)
+        dirs = resource_dirs_from_mapping(current_task)
+        if not dirs.get("images_dir"):
+            dirs["images_dir"] = str(getattr(self, "images_dir", "") or "")
+        bind_resource_dirs(dirs)
+        images_dir = dirs.get("images_dir") or ""
+        sounds_dir = dirs.get("sounds_dir") or ""
+        if hasattr(self, "parameter_panel") and self.parameter_panel:
+            if images_dir:
+                self.parameter_panel.images_dir = images_dir
+            self.parameter_panel.sounds_dir = sounds_dir
+            self.parameter_panel.dicts_dir = dirs.get("dicts_dir") or ""
+            self.parameter_panel.yolo_dir = dirs.get("yolo_dir") or ""
+            self.parameter_panel.replays_dir = dirs.get("replays_dir") or ""
+            self.parameter_panel.plugins_dir = dirs.get("plugins_dir") or ""
 
     def _disconnect_workflow_selection_signal(self, workflow_view) -> None:
         if not self._is_qobject_alive(workflow_view):
@@ -152,9 +177,8 @@ class MainWindowWorkflowSwitchMixin:
 
             return
 
-        # 使用标签页控件的创建功能
-
-        task_id = self.workflow_tab_widget.create_blank_workflow()
+        workspace_dir = self._prompt_workspace_for_new_workflow()
+        task_id = self.workflow_tab_widget.create_blank_workflow(workspace_dir=workspace_dir)
 
         if task_id is not None:
 
@@ -165,6 +189,66 @@ class MainWindowWorkflowSwitchMixin:
         else:
 
             logger.info("空白工作流创建失败")
+
+    def _configured_user_workspace_dirs(self) -> list:
+        from task_workflow.workspace import is_default_app_workspace
+        from ui.export_parts.export_scripts import workspace_dirs_from_main
+
+        return [path for path in workspace_dirs_from_main(self) if not is_default_app_workspace(path)]
+
+    def _prompt_workspace_for_new_workflow(self) -> str:
+        """没有用户工作区时询问是否添加。已有则返回第一个；取消则走默认目录。"""
+        from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox
+
+        existing = self._configured_user_workspace_dirs()
+        if existing:
+            return existing[0]
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setWindowTitle("添加工作区")
+        box.setText(
+            "还没有工作区。新建的工作流会保存在软件默认目录，之后可能不好找。\n\n是否现在添加工作区？"
+        )
+        box.setStandardButtons(QMessageBox.StandardButton.NoButton)
+        add_button = box.addButton("添加", QMessageBox.ButtonRole.AcceptRole)
+        box.addButton("暂不添加", QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(add_button)
+        box.exec()
+        clicked = box.clickedButton()
+        clicked_text = str(clicked.text() or "").replace("&", "") if clicked is not None else ""
+        if clicked_text != "添加":
+            return ""
+        panel = getattr(self, "parameter_panel", None)
+        if panel is not None and hasattr(panel, "show_favorites"):
+            try:
+                panel.show_favorites()
+                self._parameter_panel_visible = True
+                QApplication.processEvents()
+            except Exception:
+                logger.error("打开工作区面板失败", exc_info=True)
+        folder = QFileDialog.getExistingDirectory(
+            panel if panel is not None else self,
+            "选择工作区目录",
+            "",
+        )
+        if not folder:
+            return ""
+        if panel is not None and hasattr(panel, "_add_favorite_workspace_dir"):
+            added = str(panel._add_favorite_workspace_dir(folder) or "")
+            if added and hasattr(panel, "show_favorites"):
+                panel.show_favorites()
+                self._parameter_panel_visible = True
+            return added
+        return os.path.abspath(os.path.normpath(folder))
+
+    def _offer_workspace_if_missing(self) -> None:
+        if self._configured_user_workspace_dirs():
+            return
+        tab = getattr(self, "workflow_tab_widget", None)
+        manager = getattr(tab, "task_manager", None) if tab is not None else None
+        if manager is not None and manager.get_all_tasks():
+            return
+        self._prompt_workspace_for_new_workflow()
 
     def _ensure_current_workflow(self, show_warning: bool = True) -> bool:
 

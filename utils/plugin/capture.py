@@ -31,7 +31,8 @@ def get_last_plugin_capture_failure_reason() -> str:
 
 def _set_failure(reason: str) -> None:
     global _LAST_FAILURE
-    _LAST_FAILURE = str(reason or "").strip()
+    with _LOCK:
+        _LAST_FAILURE = str(reason or "").strip()
 
 
 def capture_window_plugin(
@@ -39,11 +40,10 @@ def capture_window_plugin(
     display: str,
     client_area_only: bool = True,
     timeout: float = 4.0,
-    fallback: bool = False,
     bind_extras=None,
     bind_params=None,
 ) -> Optional[np.ndarray]:
-    """按配置的 display 绑定并取帧。默认不静默降级：绑不上就返回 None 并给出可读原因。
+    """按配置的 display 绑定并取帧。绑不上就返回 None 并给出可读原因。
 
     bind_extras=(public, fake_active) 可覆盖运行时配置里的可选绑定参数（设置页边改边试绑用）。
     """
@@ -56,13 +56,9 @@ def capture_window_plugin(
         _set_failure("plugin runtime unavailable")
         return None
     try:
-        input_hwnd = target
-        try:
-            from utils.window.window_binding_utils import resolve_plugin_input_hwnd_for_display
+        from utils.window.window_binding_utils import resolve_plugin_input_hwnd_for_display
 
-            input_hwnd = int(resolve_plugin_input_hwnd_for_display(target) or target)
-        except Exception:
-            input_hwnd = target
+        input_hwnd = int(resolve_plugin_input_hwnd_for_display(target) or target)
         session = get_shared_plugin_client(target)
         frame = session.capture_bgr(
             target,
@@ -70,7 +66,6 @@ def capture_window_plugin(
             input_hwnd=input_hwnd,
             timeout=timeout,
             client_area_only=client_area_only,
-            fallback=fallback,
             bind_extras=bind_extras,
             bind_params=bind_params,
         )

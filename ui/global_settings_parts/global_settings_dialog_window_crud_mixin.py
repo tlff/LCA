@@ -11,9 +11,6 @@ from utils.window.window_identity import apply_window_identity
 
 logger = logging.getLogger(__name__)
 
-# 连续切换下拉时合并成一次试绑
-LIVE_PLUGIN_PROBE_DEBOUNCE_MS = 600
-
 
 class GlobalSettingsDialogWindowCrudMixin:
 
@@ -128,72 +125,23 @@ class GlobalSettingsDialogWindowCrudMixin:
                 return window_info
         return None
 
-    def _live_plugin_probe_config(self) -> dict:
-        if hasattr(self, "get_settings"):
-            try:
-                return self.get_settings()
-            except Exception:
-                logger.debug("读取当前插件参数失败，回退已保存配置", exc_info=True)
-        return dict(getattr(self, "current_config", None) or {})
-
     def _probe_plugin_bind_for_window(self, window_info: dict) -> None:
         from ui.plugin_bind_probe import schedule_dialog_plugin_bind_probe
 
         self._remember_plugin_probe_stamps()
+        try:
+            config = self.get_settings()
+        except Exception as exc:
+            logger.warning("读取当前插件参数失败: %s", exc)
+            return
         schedule_dialog_plugin_bind_probe(
             self,
             (window_info or {}).get("hwnd"),
-            self._live_plugin_probe_config(),
+            config,
             window_info,
             (window_info or {}).get("title"),
             on_done=lambda _result: self._refresh_plugin_probe_feedback(),
         )
-
-    # ---- 边改插件参数边对整份绑定列表试绑（不加按钮，结果写在参数面板的状态行） ----
-
-    def _request_live_plugin_reprobe(self, *_args) -> None:
-        if not getattr(self, "_plugin_live_probe_ready", False):
-            return
-        timer = getattr(self, "_plugin_live_probe_timer", None)
-        if timer is None:
-            from PySide6.QtCore import QTimer
-
-            timer = QTimer(self)
-            timer.setSingleShot(True)
-            timer.setInterval(LIVE_PLUGIN_PROBE_DEBOUNCE_MS)
-            timer.timeout.connect(self._run_live_plugin_reprobe)
-            self._plugin_live_probe_timer = timer
-        timer.start()
-
-    def _run_live_plugin_reprobe(self) -> None:
-        from ui.plugin_bind_probe import schedule_bound_windows_plugin_bind_probe
-        from utils.plugin.bind_probe import should_probe_plugin_bind
-        from utils.plugin.settings_sync import plugin_settings_view
-
-        config = self._live_plugin_probe_config()
-        windows = [w for w in self.bound_windows if isinstance(w, dict) and w.get("enabled", True)]
-        if not should_probe_plugin_bind(config) or not windows:
-            self._set_plugin_probe_status("")
-            return
-        probe_key = tuple(sorted((key, str(value)) for key, value in plugin_settings_view(config).items()))
-        if probe_key == getattr(self, "_plugin_live_probe_key", None):
-            return
-        self._plugin_live_probe_key = probe_key
-        self._remember_plugin_probe_stamps()
-        # 每次试绑一个代号：更早的一轮或已取消的对话框不再往条目上打戳
-        generation = int(getattr(self, "_plugin_live_probe_generation", 0)) + 1
-        self._plugin_live_probe_generation = generation
-        self._set_plugin_probe_status(f"试绑中：正在按当前参数绑定 {len(windows)} 个窗口…")
-        started = schedule_bound_windows_plugin_bind_probe(
-            self,
-            windows,
-            config,
-            on_done=lambda _results: self._refresh_plugin_probe_feedback(),
-            notify=False,
-            should_stop=lambda: getattr(self, "_plugin_live_probe_generation", 0) != generation,
-        )
-        if not started:
-            self._set_plugin_probe_status("")
 
     def _remember_plugin_probe_stamps(self) -> None:
         """第一次试绑前记住原有戳记，取消对话框时还原，避免未保存的参数留下误导状态。"""
@@ -206,59 +154,16 @@ class GlobalSettingsDialogWindowCrudMixin:
         ]
 
     def _refresh_plugin_probe_feedback(self, *, refresh_combo: bool = True) -> None:
-        if (
-            hasattr(self, "_selected_input_backend")
-            and self._selected_input_backend() != "plugin"
-        ):
-            self._set_plugin_probe_status("")
-            combo = getattr(self, "bound_windows_combo", None)
-            if refresh_combo and combo is not None and hasattr(self, "_refresh_bound_windows_combo"):
-                current = combo.currentIndex()
-                self._refresh_bound_windows_combo()
-                if 0 <= current < combo.count():
-                    combo.setCurrentIndex(current)
-            return
-
-        stamped = [
-            w for w in self.bound_windows
-            if isinstance(w, dict) and w.get("enabled", True) and "plugin_bind_ok" in w
-        ]
-        failed = [w for w in stamped if not w.get("plugin_bind_ok")]
-        if not stamped:
-            self._set_plugin_probe_status("")
-        elif failed:
-            names = "、".join(str(w.get("title") or "窗口") for w in failed)
-            detail = "\n".join(
-                f"{w.get('title') or '窗口'}：{str(w.get('plugin_bind_error') or '').strip() or '插件试绑失败'}"
-                for w in failed
-            )
-            self._set_plugin_probe_status(f"试绑失败 {len(failed)}/{len(stamped)}：{names}", detail)
-        else:
-            self._set_plugin_probe_status(f"试绑通过：{len(stamped)} 个绑定窗口均可用")
         combo = getattr(self, "bound_windows_combo", None)
-        if refresh_combo and combo is not None and hasattr(self, "_refresh_bound_windows_combo"):
-            current = combo.currentIndex()
-            self._refresh_bound_windows_combo()
-            if 0 <= current < combo.count():
-                combo.setCurrentIndex(current)
-
-    def _set_plugin_probe_status(self, text: str, tooltip: str = "") -> None:
-        label = getattr(self, "plugin_bind_probe_status_label", None)
-        if label is None:
+        if not refresh_combo or combo is None or not hasattr(self, "_refresh_bound_windows_combo"):
             return
-        try:
-            label.setText(text)
-            label.setToolTip(tooltip)
-            label.setVisible(bool(text))
-        except RuntimeError:
-            pass
+        current = combo.currentIndex()
+        self._refresh_bound_windows_combo()
+        if 0 <= current < combo.count():
+            combo.setCurrentIndex(current)
 
     def _discard_live_plugin_probe(self) -> None:
-        """取消对话框：让还在跑的试绑作废，还原试绑戳记，并解开用未保存参数绑上的窗口。"""
-        timer = getattr(self, "_plugin_live_probe_timer", None)
-        if timer is not None:
-            timer.stop()
-        self._plugin_live_probe_generation = int(getattr(self, "_plugin_live_probe_generation", 0)) + 1
+        """取消对话框：还原试绑戳记，并解开用未保存参数绑上的窗口。"""
         backup = getattr(self, "_plugin_probe_stamps_backup", None)
         if backup is None:
             return
@@ -279,12 +184,7 @@ class GlobalSettingsDialogWindowCrudMixin:
         threading.Thread(target=unbind_shared_plugin_windows, name="plugin-probe-discard", daemon=True).start()
 
     def _finish_live_plugin_probe_for_accept(self) -> None:
-        """确认保存前停止设置页试绑；保存后的运行时同步会按最终参数统一复检。"""
-        timer = getattr(self, "_plugin_live_probe_timer", None)
-        if timer is not None:
-            timer.stop()
-        self._plugin_live_probe_generation = int(getattr(self, "_plugin_live_probe_generation", 0)) + 1
-        # 用户已确认这些设置，不再需要 reject 时恢复打开对话框前的旧戳记。
+        """确认保存后不再需要还原打开对话框前的旧戳记。"""
         self._plugin_probe_stamps_backup = None
 
     def reject(self):

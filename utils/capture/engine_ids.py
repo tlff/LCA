@@ -16,40 +16,18 @@ PLUGIN_SCREENSHOT_BASIC_ENGINES = (
     "dx3",
 )
 PLUGIN_SCREENSHOT_EX_ENGINES = (
-    "dx.d3d9",
-    "dx.d3d10",
-    "dx.d3d11",
-    "opengl",
+    "dx.graphic.2d",
+    "dx.graphic.2d.2",
+    "dx.graphic.3d",
+    "dx.graphic.3d.8",
+    "dx.graphic.3d.10plus",
+    "dx.graphic.opengl",
+    "dx.graphic.opengl.esv2",
 )
 PLUGIN_SCREENSHOT_ENGINES = PLUGIN_SCREENSHOT_BASIC_ENGINES + PLUGIN_SCREENSHOT_EX_ENGINES
 
-PLUGIN_SCREENSHOT_ENGINE_ALIASES = (
-    "opengl.std",
-    "opengl.nox",
-    "opengl.es",
-)
-
-SUPPORTED_SCREENSHOT_ENGINES = (
-    NATIVE_SCREENSHOT_ENGINES + PLUGIN_SCREENSHOT_ENGINES + PLUGIN_SCREENSHOT_ENGINE_ALIASES
-)
-BACKGROUND_SCREENSHOT_ENGINES = (
-    ("wgc", "printwindow") + PLUGIN_SCREENSHOT_ENGINES + PLUGIN_SCREENSHOT_ENGINE_ALIASES
-)
-
-_PLUGIN_OPENGL_FAMILY = (
-    "opengl",
-    "opengl.std",
-    "opengl.nox",
-    "opengl.es",
-)
-_PLUGIN_DX_FAMILY = (
-    "dx.d3d9",
-    "dx.d3d10",
-    "dx.d3d11",
-    "dx",
-    "dx2",
-    "dx3",
-)
+SUPPORTED_SCREENSHOT_ENGINES = NATIVE_SCREENSHOT_ENGINES + PLUGIN_SCREENSHOT_ENGINES
+BACKGROUND_SCREENSHOT_ENGINES = ("wgc", "printwindow") + PLUGIN_SCREENSHOT_ENGINES
 
 _SCREENSHOT_ENGINE_LABELS = {
     "wgc": "WGC",
@@ -62,24 +40,17 @@ _SCREENSHOT_ENGINE_LABELS = {
     "dx": "DX",
     "dx2": "DX2",
     "dx3": "DX3",
-    "dx.d3d9": "D3D9",
-    "dx.d3d10": "D3D10",
-    "dx.d3d11": "D3D11",
-    "opengl": "OpenGL",
-    "opengl.std": "OpenGL",
-    "opengl.nox": "OpenGL",
-    "opengl.es": "OpenGL",
+    "dx.graphic.2d": "DX · 2D",
+    "dx.graphic.2d.2": "DX · 2D增强",
+    "dx.graphic.3d": "DX · 3D",
+    "dx.graphic.3d.8": "DX · D3D8",
+    "dx.graphic.3d.10plus": "DX · D3D10+",
+    "dx.graphic.opengl": "OpenGL",
+    "dx.graphic.opengl.esv2": "OpenGL ES",
 }
 
 _DM_DISPLAY_MAP = {
     "plugin.gdi": "gdi",
-    "opengl": "dx.graphic.opengl",
-    "opengl.std": "dx.graphic.opengl",
-    "opengl.nox": "dx.graphic.opengl",
-    "opengl.es": "dx.graphic.opengl.esv2",
-    "dx.d3d9": "dx.graphic.3d.8",
-    "dx.d3d10": "dx.graphic.3d.10plus",
-    "dx.d3d11": "dx.graphic.3d.10plus",
 }
 
 SCREENSHOT_ENGINE_UI_GROUPS = (
@@ -88,10 +59,9 @@ SCREENSHOT_ENGINE_UI_GROUPS = (
 )
 
 _SUPPORTED_SET = frozenset(SUPPORTED_SCREENSHOT_ENGINES)
-_PLUGIN_SET = frozenset(PLUGIN_SCREENSHOT_ENGINES + PLUGIN_SCREENSHOT_ENGINE_ALIASES)
+_PLUGIN_SET = frozenset(PLUGIN_SCREENSHOT_ENGINES)
 _NATIVE_SET = frozenset(NATIVE_SCREENSHOT_ENGINES)
 _BACKGROUND_SET = frozenset(BACKGROUND_SCREENSHOT_ENGINES)
-_OPENGL_ALIAS_SET = frozenset(PLUGIN_SCREENSHOT_ENGINE_ALIASES)
 
 
 def normalize_screenshot_engine(engine: object) -> str:
@@ -99,10 +69,7 @@ def normalize_screenshot_engine(engine: object) -> str:
 
 
 def canonicalize_screenshot_engine(engine: object) -> str:
-    mode = normalize_screenshot_engine(engine)
-    if mode in _OPENGL_ALIAS_SET or mode.startswith("opengl."):
-        return "opengl"
-    return mode
+    return normalize_screenshot_engine(engine)
 
 
 def to_dm_display_mode(engine: object) -> str:
@@ -177,20 +144,3 @@ def screenshot_engine_ui_group(engine: object) -> str:
     if is_native_screenshot_engine(engine):
         return "原生"
     return "原生"
-
-
-def iter_plugin_capture_display_candidates(display: object) -> tuple[str, ...]:
-    mode = normalize_screenshot_engine(display)
-    if not mode:
-        return ()
-    if mode in _PLUGIN_OPENGL_FAMILY or mode.startswith("opengl"):
-        family = _PLUGIN_OPENGL_FAMILY
-    elif mode in _PLUGIN_DX_FAMILY or mode.startswith("dx"):
-        family = _PLUGIN_DX_FAMILY
-    else:
-        return (mode,)
-    ordered = [mode]
-    for item in family:
-        if item not in ordered:
-            ordered.append(item)
-    return tuple(ordered)

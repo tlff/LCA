@@ -246,6 +246,9 @@ class WorkflowTabWidget(QTabWidget):
         workflow_data = task.workflow_data if isinstance(task.workflow_data, dict) else {}
         if not isinstance(workflow_data, dict):
             return workflow_data
+        metadata = workflow_data.get("metadata")
+        if isinstance(metadata, dict) and str(metadata.get("created") or "") == "blank":
+            return workflow_data
 
         state_key = self._build_view_state_key(getattr(task, "filepath", None))
         persisted_state = self._persisted_view_states.get(state_key) if state_key else None
@@ -433,8 +436,13 @@ class WorkflowTabWidget(QTabWidget):
             return None
 
         try:
-            # 加载工作流数据
+            original_filepath = filepath
             workflow_data = load_workflow_file(filepath)
+            if (
+                not str(original_filepath).startswith("memory://")
+                and Path(original_filepath).suffix.lower() == ".json"
+            ):
+                filepath = str(Path(original_filepath).with_suffix(".lca"))
             jump_config, window_binding = self._validate_workflow_import_data(workflow_data, filepath)
 
             # 生成任务名称
@@ -579,28 +587,14 @@ class WorkflowTabWidget(QTabWidget):
         """只按调用方给出的明确路径解析，不搜索或猜测同名文件。"""
         if not isinstance(filepath, str) or not filepath.strip():
             raise ValueError("未指定子工作流文件")
-        filepath = filepath.strip()
-        if filepath.startswith("memory://"):
-            return filepath
-        try:
-            from app_core.lca_format.session import get_current_session
+        from task_workflow.sub_workflow_path import resolve_sub_workflow_path
 
-            session = get_current_session()
-            logical_path = filepath.replace("\\", "/").lstrip("/")
-            if session is not None and session.get_bytes(logical_path) is not None:
-                return "memory://" + logical_path
-        except Exception:
-            pass
-        if os.path.isabs(filepath):
-            resolved = os.path.abspath(os.path.normpath(filepath))
-        else:
-            if not isinstance(parent_workflow_file, str) or not parent_workflow_file.strip():
-                raise ValueError("相对子工作流路径缺少父工作流文件")
-            parent_path = os.path.abspath(os.path.normpath(parent_workflow_file))
-            parent_dir = parent_path if os.path.isdir(parent_path) else os.path.dirname(parent_path)
-            resolved = os.path.abspath(os.path.normpath(os.path.join(parent_dir, filepath)))
-        if not resolved.startswith("memory://") and not os.path.isfile(resolved):
-            raise FileNotFoundError(f"子工作流文件不存在: {resolved}")
+        resolved = resolve_sub_workflow_path(
+            filepath.strip(),
+            parent_workflow_file=parent_workflow_file,
+        )
+        if not resolved:
+            raise FileNotFoundError(f"子工作流文件不存在: {filepath.strip()}")
         return resolved
 
     def open_sub_workflow(self, filepath: str, parent_workflow_file: Optional[str] = None) -> Optional[int]:
@@ -645,7 +639,17 @@ class WorkflowTabWidget(QTabWidget):
 
         # 文件未打开，导入它
         try:
-            workflow_data = load_workflow_file(filepath)
+            from task_workflow.workflow_payload import load_workflow_package
+
+            workflow_data, nested_session = load_workflow_package(
+                filepath,
+                parent_workflow_file=parent_file,
+            )
+            if not str(filepath).startswith("memory://"):
+                from app_core.lca_format.session import activate, register
+
+                register(filepath, nested_session)
+                activate(filepath)
             jump_config, window_binding = self._validate_workflow_import_data(workflow_data, filepath)
 
             # 生成标签页名称（带子流程前缀）
@@ -655,10 +659,19 @@ class WorkflowTabWidget(QTabWidget):
             # 添加任务到管理器
             task_id = self.task_manager.add_task(name, filepath, workflow_data)
 
-            # 标记为子工作流（可选，用于后续识别）
             task = self.task_manager.get_task(task_id)
             if task:
-                task.is_sub_workflow = True
+                if str(filepath).startswith("memory://"):
+                    from app_core.lca_format.session import register_temporary
+                    from task_workflow.workspace import apply_resource_dirs_to_task
+
+                    nested_path = register_temporary(nested_session)
+                    task.lca_session = nested_session
+                    task.lca_session_path = nested_path
+                    task.host_workflow_filepath = str(parent_file or "").strip()
+                    logical = str(filepath)[len("memory://"):]
+                    task.host_logical_path = logical
+                    apply_resource_dirs_to_task(task, nested_session.resource_dirs())
                 if jump_config is not None:
                     task.jump_enabled = jump_config['enabled']
                     task.jump_rules = jump_config['rules'].copy()
@@ -682,19 +695,26 @@ class WorkflowTabWidget(QTabWidget):
             QMessageBox.critical(self, "打开失败", f"打开子工作流失败:\n{e}")
             return None
 
-    def create_blank_workflow(self, name: str = None) -> Optional[int]:
+    def create_blank_workflow(self, name: str = None, workspace_dir: str = "") -> Optional[int]:
         """
         创建空白工作流
 
         Args:
             name: 工作流名称（None则使用默认名称）
+            workspace_dir: 工作区根目录；为空则使用软件默认目录
 
         Returns:
             新任务的ID，失败返回None
         """
         try:
+            from task_workflow.workspace import (
+                blank_workflow_data,
+                ensure_workflow_resource_subdirs,
+                new_workflow_filepath,
+            )
             from utils.app_paths import get_workflows_dir
 
+            workspace_root = str(workspace_dir or "").strip()
             # 如果没有提供名称，使用默认名称
             if not name:
                 # 生成默认名称：未命名工作流1, 未命名工作流2, ...
@@ -707,24 +727,19 @@ class WorkflowTabWidget(QTabWidget):
                         if task.name == name or task.name == f"{name}.lca":
                             exists = True
                             break
-                    if os.path.exists(os.path.join(get_workflows_dir(), f"{name}.lca")):
+                    if os.path.exists(new_workflow_filepath(name, workspace_root)):
+                        exists = True
+                    if (not workspace_root) and os.path.exists(os.path.join(get_workflows_dir(), f"{name}.lca")):
                         exists = True
                     if not exists:
                         break
                     count += 1
 
-            # 创建空白工作流数据
-            workflow_data = {
-                'cards': [],
-                'connections': [],
-                'metadata': {
-                    'created': 'blank',
-                    'version': '1.0'
-                }
-            }
+            default_filepath = new_workflow_filepath(name, workspace_root)
+            project_dir = os.path.dirname(os.path.abspath(default_filepath))
+            ensure_workflow_resource_subdirs(project_dir)
+            workflow_data = blank_workflow_data(project_dir)
 
-            # 添加任务到管理器（预设 workflows 目录作为首次保存目标）
-            default_filepath = os.path.join(get_workflows_dir(), f"{name}.lca")
             task_id = self.task_manager.add_task(name, default_filepath, workflow_data)
             self.workflow_imported.emit(task_id)
 
@@ -1505,10 +1520,32 @@ class WorkflowTabWidget(QTabWidget):
         tooltip = f"任务: {task.name}\n路径: {task.filepath}\n状态: {task.status}"
         self.setTabToolTip(tab_index, tooltip)
 
+    def _sync_host_package_session(self, saved_task) -> None:
+        host = str(getattr(saved_task, "host_workflow_filepath", "") or "").strip()
+        if not host:
+            return
+        from app_core.lca_format.session import get_for_path
+
+        session = get_for_path(host)
+        if session is None:
+            return
+        host_key = os.path.normcase(os.path.abspath(host))
+        for task in self.task_manager.tasks.values():
+            path = str(getattr(task, "filepath", "") or "").strip()
+            if not path or path.startswith("memory://"):
+                continue
+            if os.path.normcase(os.path.abspath(path)) == host_key:
+                task.lca_session = session
+                task.lca_session_path = os.path.abspath(host)
+
     def _persist_task(self, task, *, old_filepath: str | None = None, workflow_data=None) -> bool:
         previous = old_filepath if old_filepath is not None else (task.filepath or "")
         if not task.save_and_backup(workflow_data=workflow_data):
             return False
+        self._sync_host_package_session(task)
+        host = self.window()
+        if host is not None and hasattr(host, "_sync_saved_task_resources"):
+            host._sync_saved_task_resources(task, workflow_data)
         new_filepath = task.filepath or ""
         if previous and new_filepath:
             from task_workflow.workspace import favorite_path_key
@@ -1558,8 +1595,11 @@ class WorkflowTabWidget(QTabWidget):
             task.update_workflow_data(workflow_data)
 
         # 选择保存路径
-        from utils.app_paths import get_workflows_dir
-        default_save_path = task.filepath or os.path.join(get_workflows_dir(), task.name or "workflow.lca")
+        from task_workflow.workspace import (
+            default_new_workflow_filepath,
+            prepare_exclusive_workflow_save,
+        )
+        default_save_path = task.filepath or default_new_workflow_filepath(task.name or "workflow")
         default_save_path = os.path.splitext(default_save_path)[0] + ".lca"
         filepath, _ = QFileDialog.getSaveFileName(
             self,
@@ -1573,11 +1613,24 @@ class WorkflowTabWidget(QTabWidget):
         if not filepath.lower().endswith(".lca"):
             filepath += ".lca"
 
+        workflow_data = task.workflow_data if isinstance(task.workflow_data, dict) else {}
+        filepath = prepare_exclusive_workflow_save(
+            workflow_data,
+            filepath,
+            source_filepath=old_filepath,
+        )
+        task.update_workflow_data(workflow_data)
+        if task_id in self.task_views:
+            metadata = workflow_data.get("metadata") if isinstance(workflow_data, dict) else {}
+            self.task_views[task_id].workflow_metadata = dict(metadata) if isinstance(metadata, dict) else {}
+
         # 更新任务文件路径
         task.filepath = filepath
         task.name = os.path.basename(filepath)
+        task.host_workflow_filepath = ""
+        task.host_logical_path = ""
 
-        if self._persist_task(task, old_filepath=old_filepath):
+        if self._persist_task(task, old_filepath=old_filepath, workflow_data=workflow_data):
             QMessageBox.information(self, "保存成功", f"任务已另存为: {filepath}")
             self._update_tab_status(task_id)
         else:

@@ -80,6 +80,15 @@ def build_manifest_and_ui_files(
         req_w = req_h = 0
     if req_w <= 0 or req_h <= 0:
         req_w = req_h = 0
+    from app_core.player.script_metadata import validate_release_metadata
+
+    normalized_scripts = []
+    for raw_script in list(scripts or []):
+        if not isinstance(raw_script, dict):
+            continue
+        item = dict(raw_script)
+        item.update(validate_release_metadata(item))
+        normalized_scripts.append(item)
     manifest = {
         "schema_version": PLAYER_PACKAGE_SCHEMA_VERSION,
         "app_name": app_name,
@@ -90,7 +99,7 @@ def build_manifest_and_ui_files(
         "version": version,
         "required_client_width": req_w,
         "required_client_height": req_h,
-        "scripts": list(scripts or []),
+        "scripts": normalized_scripts,
     }
     snapshot = snapshot_export_runtime_config(runtime_config)
     ui_payload = apply_player_ui_hotkeys(ensure_designer_ui(ui, app_name=app_name), snapshot)

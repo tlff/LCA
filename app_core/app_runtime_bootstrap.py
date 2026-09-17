@@ -2,6 +2,7 @@ import logging
 import os
 import threading
 
+from PySide6.QtCore import QLocale
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication, QToolTip
 
@@ -10,6 +11,10 @@ from utils.app_paths import get_config_path, get_resource_path
 
 
 def create_application(argv):
+    # Do not inherit zh-TW/zh-HK from Windows.  Qt uses its default locale for
+    # number/date formatting in every widget, including controls created by
+    # plugins and dialogs outside the main window.
+    QLocale.setDefault(QLocale("zh_CN"))
     return QApplication(argv)
 
 

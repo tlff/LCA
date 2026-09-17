@@ -55,6 +55,7 @@ SECTION_FIELDS = {
         "plugin_bind_mode",
         "plugin_text_ime",
         "plugin_fake_active",
+        "plugin_public",
         "plugin_reg_code",
         "plugin_extra_code",
         "binding_method",

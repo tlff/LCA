@@ -137,7 +137,7 @@ class _SplitForegroundDriverProxy:
         return self._safe_call(self._keyboard_driver, "key_up", key)
 
     def modified_key_press(self, key, held_keys=None, duration=DEFAULT_KEY_HOLD_SECONDS):
-        """Ib 驱动的组合键原子接口；键盘侧驱动不提供时返回 False，由调用方回退到 down/up。"""
+        """键盘驱动的组合键原子按住。驱动没有该接口时返回 False。"""
         return self._safe_call(self._keyboard_driver, "modified_key_press", key, held_keys, duration)
 
     def release_all_keys(self) -> bool:

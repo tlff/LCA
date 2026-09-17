@@ -268,7 +268,7 @@ QPushButton[primary="true"]:pressed {
 }
 
 /* 杈撳叆妗?*/
-QLineEdit, QTextEdit, QPlainTextEdit {
+QLineEdit, QTextEdit, QTextBrowser, QPlainTextEdit {
     background-color: #252525;
     color: #e0e0e0;
     border: 1px solid #3e3e3e;
@@ -279,11 +279,11 @@ QLineEdit, QTextEdit, QPlainTextEdit {
     selection-color: #ffffff;
 }
 
-QLineEdit:focus, QTextEdit:focus, QPlainTextEdit:focus {
+QLineEdit:focus, QTextEdit:focus, QTextBrowser:focus, QPlainTextEdit:focus {
     border-color: #0078d4;
 }
 
-QLineEdit:disabled, QTextEdit:disabled, QPlainTextEdit:disabled {
+QLineEdit:disabled, QTextEdit:disabled, QTextBrowser:disabled, QPlainTextEdit:disabled {
     background-color: #1e1e1e;
     color: #666666;
     border-color: #2e2e2e;
@@ -501,7 +501,8 @@ QCheckBox::indicator:disabled {
 
 /* 脚本列表等：QListWidget 勾选与 QCheckBox 同款 */
 QListWidget#PlayerScriptListView::indicator,
-QListWidget#DesignerScriptList::indicator {
+QListWidget#DesignerScriptList::indicator,
+QListWidget#pluginPublicList::indicator {
     width: 16px;
     height: 16px;
     border: 1px solid #3e3e3e;
@@ -510,25 +511,29 @@ QListWidget#DesignerScriptList::indicator {
 }
 
 QListWidget#PlayerScriptListView::indicator:hover,
-QListWidget#DesignerScriptList::indicator:hover {
+QListWidget#DesignerScriptList::indicator:hover,
+QListWidget#pluginPublicList::indicator:hover {
     border-color: #4e4e4e;
 }
 
 QListWidget#PlayerScriptListView::indicator:checked,
-QListWidget#DesignerScriptList::indicator:checked {
+QListWidget#DesignerScriptList::indicator:checked,
+QListWidget#pluginPublicList::indicator:checked {
     background-color: #0078d4;
     border-color: #0078d4;
     image: url(themes/icons/check-white.svg);
 }
 
 QListWidget#PlayerScriptListView::indicator:checked:hover,
-QListWidget#DesignerScriptList::indicator:checked:hover {
+QListWidget#DesignerScriptList::indicator:checked:hover,
+QListWidget#pluginPublicList::indicator:checked:hover {
     background-color: #1084d8;
     border-color: #1084d8;
 }
 
 QListWidget#PlayerScriptListView::indicator:disabled,
-QListWidget#DesignerScriptList::indicator:disabled {
+QListWidget#DesignerScriptList::indicator:disabled,
+QListWidget#pluginPublicList::indicator:disabled {
     background-color: #1e1e1e;
     border-color: #2e2e2e;
 }
@@ -1328,7 +1333,7 @@ QListWidget::item:selected {
 }
 
 /* 鏂囨湰缂栬緫鍣?*/
-QTextEdit, QPlainTextEdit {
+QTextEdit, QTextBrowser, QPlainTextEdit {
     background-color: #252525;
     color: #e0e0e0;
     border: 1px solid #3e3e3e;
@@ -1648,6 +1653,13 @@ QFrame#customDropdownPopup {
 }
 
 /* 涓嬫媺妗嗗垪琛?*/
+QWidget#pluginPublicInner,
+QFrame#customDropdownPopup QWidget#pluginPublicInner,
+QFrame#customDropdownPopup QCheckBox {
+    background-color: transparent;
+    border: none;
+}
+
 QListWidget#customDropdownList {
     border: none;
     background-color: transparent;
@@ -2163,6 +2175,44 @@ QFrame#randomTargetCard:hover {
     padding: 6px 10px;
 }
 
+#scriptEditorDialog QPushButton#scriptDebugToggle {
+    min-width: 28px;
+    max-width: 28px;
+    padding: 4px 1px;
+    font-weight: bold;
+}
+
+#scriptEditorDialog QPushButton#scriptDebugToggle:checked {
+    background-color: #264f78;
+    color: #8cc8ff;
+}
+
+#scriptEditorDialog QPushButton#scriptDebugButton {
+    min-width: 42px;
+    padding: 3px 5px;
+}
+
+#scriptEditorDialog QLabel#scriptDebugTitle {
+    background: transparent;
+    color: #e0e0e0;
+    font-weight: bold;
+}
+
+#scriptEditorDialog QWidget#scriptEditorWorkspace {
+    background: transparent;
+}
+
+#scriptEditorDialog QWidget#scriptDebugPanel {
+    border-left: 1px solid #3e3e3e;
+    padding: 4px;
+}
+
+#scriptEditorDialog QWidget#scriptDebugPanel {
+    background: #1e1e1e;
+    border: 1px solid #3e3e3e;
+    border-radius: 4px;
+}
+
 #scriptEditorDialog QLineEdit,
 #scriptEditorDialog QComboBox {
     background-color: #252525;
@@ -2239,6 +2289,7 @@ QFrame#randomTargetCard:hover {
 #scriptEditorDialog QLabel#scriptCommandHint,
 #scriptEditorDialog QLabel#scriptCommandDetail,
 #scriptEditorDialog QLabel#scriptCaptureHint,
+#scriptEditorDialog QLabel#scriptResourceStatus,
 #scriptEditorDialog QLabel#scriptResourceHint,
 #scriptEditorDialog QLabel#scriptResourceEmpty,
 #scriptEditorDialog QLabel#scriptResourceTitle,
@@ -2422,5 +2473,3 @@ QListView#scriptCompleterPopup::item:selected {
     background-color: #0078d4;
     color: #ffffff;
 }
-
-

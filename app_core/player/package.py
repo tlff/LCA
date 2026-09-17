@@ -722,6 +722,7 @@ def normalize_player_manifest(raw: Any) -> Dict[str, Any]:
         required_width = 0
         required_height = 0
     scripts_meta: List[Dict[str, str]] = []
+    from app_core.player.script_metadata import validate_release_metadata
     raw_scripts = raw.get("scripts")
     if isinstance(raw_scripts, list):
         for item in raw_scripts:
@@ -737,6 +738,7 @@ def normalize_player_manifest(raw: Any) -> Dict[str, Any]:
                     "path": _text(item.get("path"), f"workflows/scripts/{sid}.json").replace(
                         "\\", "/"
                     ),
+                    **validate_release_metadata(item),
                 }
             )
     content_sha256 = _text(raw.get("content_sha256")).lower()
@@ -764,6 +766,10 @@ class PlayerPackage:
     userdata_dir: str
     assets_images_dir: str
     assets_sounds_dir: str
+    assets_dicts_dir: str
+    assets_replays_dir: str
+    assets_yolo_dir: str
+    assets_plugins_dir: str
     entry_workflow_path: str
     manifest: Dict[str, Any]
     ui: Dict[str, Any]

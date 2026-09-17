@@ -269,6 +269,9 @@ def overlay_is_interacting(overlay) -> bool:
             getattr(overlay, 'selecting', False)
             or getattr(overlay, 'selection_pending', False)
             or getattr(overlay, 'dragging', False)
+            or getattr(overlay, 'selection_ready', False)
+            or getattr(overlay, 'dragging_selection', False)
+            or getattr(overlay, 'resizing_selection', False)
         )
     except RuntimeError:
         return False

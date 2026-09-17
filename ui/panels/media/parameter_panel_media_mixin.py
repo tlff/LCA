@@ -3,6 +3,31 @@ from utils.window.window_activation_utils import show_and_raise_widget
 from .parameter_panel_image_viewer_dialog import ParameterPanelImageViewerDialog
 from PySide6.QtGui import QPixmap
 
+
+def directory_has_onnx(directory: str) -> bool:
+    root = str(directory or "").strip()
+    if not root or not os.path.isdir(root):
+        return False
+    try:
+        names = os.listdir(root)
+    except OSError:
+        return False
+    return any(name.lower().endswith(".onnx") for name in names)
+
+
+def resolve_yolo_model_dialog_start_dir(yolo_dir: str, bundled_yolo_dir: str) -> str:
+    """工程 yolo 目录没有 onnx 时，打开程序自带的 yolo 目录。"""
+    project = str(yolo_dir or "").strip()
+    bundled = str(bundled_yolo_dir or "").strip()
+    if directory_has_onnx(project):
+        return os.path.abspath(project)
+    if bundled and os.path.isdir(bundled):
+        return os.path.abspath(bundled)
+    if project:
+        return os.path.abspath(project) if os.path.isdir(project) else project
+    return bundled
+
+
 class ParameterPanelMediaMixin:
 
     def _select_file(self, line_edit: QLineEdit, param_def: Dict[str, Any]):
@@ -15,7 +40,9 @@ class ParameterPanelMediaMixin:
         else:
             file_filter = param_def.get('file_filter', 'All Files (*)')
 
-        filename, _ = QFileDialog.getOpenFileName(self, "选择文件", "", file_filter)
+        filename, _ = QFileDialog.getOpenFileName(
+            self, "选择文件", self._resource_dialog_start_dir(param_def), file_filter
+        )
         if filename:
             if self._is_yolo_model_param(param_def) and not filename.lower().endswith('.onnx'):
                 ext = filename.rsplit('.', 1)[-1] if '.' in filename else ''
@@ -33,6 +60,9 @@ class ParameterPanelMediaMixin:
             line_edit.setText(selected_value)
             self._update_current_parameter_from_widget(line_edit, selected_value)
             self._apply_parameters(auto_close=False)
+            refresher = getattr(self, "_refresh_selects_using_source", None)
+            if callable(refresher) and param_name:
+                refresher(param_name)
 
     def _is_yolo_model_param(self, param_def: Dict[str, Any]) -> bool:
         file_types = param_def.get('file_types', [])
@@ -44,6 +74,30 @@ class ParameterPanelMediaMixin:
             if 'onnx' in file_types.lower() or 'yolo' in file_types.lower():
                 return True
         return False
+
+    def _resource_dialog_start_dir(self, param_def: Optional[Dict[str, Any]] = None) -> str:
+        param_def = param_def if isinstance(param_def, dict) else {}
+        if self._is_yolo_model_param(param_def):
+            try:
+                from utils.app_paths import get_app_root
+
+                bundled = os.path.join(get_app_root(), "yolo")
+            except Exception:
+                bundled = ""
+            return resolve_yolo_model_dialog_start_dir(
+                str(getattr(self, "yolo_dir", "") or "").strip(),
+                bundled,
+            )
+        name = str(param_def.get("name") or "").strip().lower()
+        key = str(param_def.get("key") or "").strip().lower()
+        combined = f"{name} {key}"
+        if "replay" in combined:
+            return str(getattr(self, "replays_dir", "") or "").strip()
+        if "dict" in combined or "字库" in str(param_def.get("label") or ""):
+            return str(getattr(self, "dicts_dir", "") or "").strip()
+        if "sound" in combined or "audio" in combined:
+            return str(getattr(self, "sounds_dir", "") or "").strip()
+        return str(getattr(self, "images_dir", "") or "").strip()
 
     def _open_sub_workflow_for_edit(self, line_edit: QLineEdit):
         workflow_file = line_edit.text().strip()
@@ -73,17 +127,7 @@ class ParameterPanelMediaMixin:
             QMessageBox.critical(self, "错误", f"打开子工作流失败:\n{e}")
 
     def _resolve_validated_screenshot_hwnd(self):
-        validated_hwnd = self.target_window_hwnd
-        if not self.target_window_hwnd or not self.main_window:
-            return validated_hwnd
-        if self.main_window.is_hwnd_bound(self.target_window_hwnd):
-            return validated_hwnd
-
-        logger.warning(
-            f"当前 hwnd 已不再绑定，尝试回退: {self.target_window_hwnd}"
-        )
-        validated_hwnd, _ = self.main_window.validate_hwnd_or_get_first(self.target_window_hwnd)
-        return validated_hwnd
+        return self._get_target_window_hwnd()
 
     def _warn_no_available_screenshot_window(self):
         from PySide6.QtWidgets import QMessageBox
@@ -344,9 +388,8 @@ class ParameterPanelMediaMixin:
             from tasks.task_utils import get_image_path_resolver
 
             resolver = get_image_path_resolver()
-            if self.images_dir and os.path.exists(self.images_dir):
-                resolver.add_search_path(self.images_dir, priority=0)
-            resolved_path = resolver.resolve(image_path)
+            search_dirs = [self.images_dir] if self.images_dir else None
+            resolved_path = resolver.resolve(image_path, search_dirs=search_dirs)
             if resolved_path:
                 logger.debug(f"图片路径自动解析: {image_path} -> {resolved_path}")
                 return resolved_path
@@ -457,7 +500,7 @@ class ParameterPanelMediaMixin:
         file_paths, _ = QFileDialog.getOpenFileNames(
             self,
             '选择多个图片文件',
-            '',
+            self._resource_dialog_start_dir(param_def),
             file_filter,
         )
         return file_paths
@@ -637,9 +680,6 @@ class ParameterPanelMediaMixin:
             from tasks.task_utils import get_image_path_resolver
 
             resolver = get_image_path_resolver()
-            images_dir = getattr(self, "images_dir", None)
-            if images_dir and os.path.exists(images_dir):
-                resolver.add_search_path(images_dir, priority=0)
             return resolver
         except Exception:
             return None
@@ -647,7 +687,9 @@ class ParameterPanelMediaMixin:
     def _resolve_multi_image_full_path(self, full_path, original_line, resolver):
         if os.path.exists(full_path) or not resolver:
             return full_path
-        resolved = resolver.resolve(full_path)
+        images_dir = getattr(self, "images_dir", None)
+        search_dirs = [images_dir] if images_dir else None
+        resolved = resolver.resolve(full_path, search_dirs=search_dirs)
         if resolved:
             logger.debug(f"Resolved multi image path: {original_line} -> {resolved}")
             return resolved

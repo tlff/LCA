@@ -242,10 +242,16 @@ class ParameterPanelWindowMixin:
                 f"[Parameter Panel] Parent restored: manually_closed={self.manually_closed}, current_card_id={self.current_card_id}"
             )
             self.main_window_minimized = False
-            if not self.manually_closed and self.current_card_id is not None:
+            if not self.manually_closed and self._should_restore_panel_content():
                 logger.debug('[Parameter Panel] Delay show and reposition panel')
                 QTimer.singleShot(100, self.show)
                 QTimer.singleShot(250, self._position_panel)
+
+    def _should_restore_panel_content(self) -> bool:
+        return (
+            self.current_card_id is not None
+            or getattr(self, "_favorites_mode", False)
+        )
 
     def sync_activation(self, activated):
         if self._activation_in_progress:

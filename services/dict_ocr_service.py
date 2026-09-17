@@ -677,24 +677,37 @@ def write_dict_text_file(path: str, glyphs: Sequence[Glyph], *, append: bool = T
 
 
 def resolve_dict_path(raw_path: str) -> Optional[str]:
-    text = str(raw_path or "").strip().strip('"')
+    from task_workflow.resource_path import unwrap_resource_path
+
+    text = (unwrap_resource_path(raw_path) or "").strip().strip('"')
     if not text:
         return None
     if os.path.isfile(text):
         return os.path.abspath(text)
+    try:
+        from task_workflow.script_resources import resolve_resource_path
+
+        located = resolve_resource_path(text, enforce_jail=False)
+        if located and os.path.isfile(located):
+            return os.path.abspath(located)
+    except Exception:
+        pass
 
     basename = os.path.basename(text.replace("\\", "/"))
     search_roots: List[str] = []
     try:
+        from task_workflow.resource_context import current_dicts_dir
         from utils.app_paths import get_app_root, get_dicts_dir, get_images_dir, get_user_data_dir, get_workflows_dir
 
-        images_dir = get_images_dir("LCA")
+        dicts_dir = current_dicts_dir()
+        if dicts_dir:
+            search_roots.append(dicts_dir)
         user_dir = get_user_data_dir("LCA")
         search_roots.extend(
             [
                 os.getcwd(),
-                images_dir,
                 get_dicts_dir("LCA"),
+                get_images_dir("LCA"),
                 os.path.join(user_dir, "dicts"),
                 get_workflows_dir("LCA"),
                 os.path.join(get_app_root(), "dicts"),
@@ -704,17 +717,23 @@ def resolve_dict_path(raw_path: str) -> Optional[str]:
         search_roots.append(os.getcwd())
 
     candidates = []
+    seen_roots = set()
     for root in search_roots:
+        root_key = os.path.normcase(os.path.abspath(root)) if root else ""
+        if not root or root_key in seen_roots:
+            continue
+        seen_roots.add(root_key)
         candidates.append(os.path.join(root, text))
         candidates.append(os.path.join(root, basename))
         normalized = text.replace("\\", "/").lstrip("./")
+        if normalized.startswith("assets/images/dicts/"):
+            candidates.append(os.path.join(root, normalized[len("assets/images/dicts/") :]))
+        if normalized.startswith("dicts/"):
+            candidates.append(os.path.join(root, normalized[len("dicts/") :]))
+        if normalized.startswith("assets/images/"):
+            candidates.append(os.path.join(root, normalized[len("assets/images/") :]))
         if normalized.startswith("images/"):
-            try:
-                from utils.app_paths import get_images_dir
-
-                candidates.append(os.path.join(get_images_dir("LCA"), normalized[len("images/") :]))
-            except Exception:
-                pass
+            candidates.append(os.path.join(root, normalized[len("images/") :]))
 
     try:
         from utils.image_paths import get_image_path_resolver

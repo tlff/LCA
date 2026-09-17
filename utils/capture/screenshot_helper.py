@@ -332,7 +332,6 @@ def capture_window_plugin(
     display: str,
     client_area_only: bool = True,
     timeout: float = 4.0,
-    fallback: bool = True,
 ):
     if not callable(_capture_window_plugin_raw):
         return None
@@ -342,7 +341,6 @@ def capture_window_plugin(
             display=display,
             client_area_only=client_area_only,
             timeout=timeout,
-            fallback=fallback,
         )
     except Exception:
         return None
@@ -602,6 +600,22 @@ def get_screenshot_capabilities() -> dict:
     return _get_engine_caps(force_refresh=True, allow_spawn=True)
 
 
+def get_screenshot_diagnostics() -> dict:
+    """Return engine capabilities together with current engine failure detail."""
+    caps = get_screenshot_capabilities()
+    current = str(get_screenshot_engine() or "").strip().lower()
+    errors = {}
+    for name, available in caps.items():
+        if bool(available):
+            continue
+        try:
+            detail = str(get_last_screenshot_error(name) or "").strip()
+        except Exception:
+            detail = ""
+        errors[name] = detail or "不可用或未初始化"
+    return {"current_engine": current, "capabilities": dict(caps), "errors": errors}
+
+
 def get_screenshot_stats(engine: Optional[str] = None) -> dict:
     target_engine = str(engine or get_screenshot_engine()).strip().lower()
     if target_engine == "wgc":
@@ -783,6 +797,21 @@ def _capture_with_engine(
             captured = capture_window_plugin(hwnd, engine, client_area_only, timeout=timeout)
         else:
             raise ValueError(f"未知的截图引擎: {engine}")
+        # All screenshot consumers share this recovery point.  A frame pool
+        # can miss one request during a busy workflow; retry once so OCR,
+        # template matching, color matching and motion checks behave alike.
+        if captured is None:
+            retry_timeout = max(0.1, min(float(timeout), 2.0))
+            if engine == 'wgc':
+                captured = capture_window_wgc(hwnd, client_area_only, timeout=retry_timeout)
+            elif engine == 'printwindow':
+                captured = capture_window_printwindow(hwnd, client_area_only, timeout=retry_timeout)
+            elif engine == 'gdi':
+                captured = capture_window_gdi(hwnd, client_area_only, timeout=retry_timeout)
+            elif engine == 'dxgi':
+                captured = capture_window_dxgi(hwnd, client_area_only, timeout=retry_timeout)
+            elif is_plugin_screenshot_engine(engine):
+                captured = capture_window_plugin(hwnd, engine, client_area_only, timeout=retry_timeout)
         if captured is None:
             try:
                 last_error = str(get_last_screenshot_error(engine=engine) or "").strip()
@@ -1292,6 +1321,4 @@ if __name__ == "__main__":
     logger.info("\n" + "=" * 80)
     logger.info("测试完成")
     logger.info("=" * 80)
-
-
 

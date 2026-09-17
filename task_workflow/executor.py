@@ -97,7 +97,12 @@ class WorkflowExecutor(QObject):
                  external_pause_checker: Optional[Callable[[], bool]] = None,
                  cleanup_runtime_image_on_finish: bool = True,
                  clear_runtime_state_on_start: bool = True,
-                 infinite_loop_guard_enabled: bool = False):
+                 infinite_loop_guard_enabled: bool = False,
+                 sounds_dir: str = None,
+                 dicts_dir: str = None,
+                 yolo_dir: str = None,
+                 replays_dir: str = None,
+                 plugins_dir: str = None):
         """
         初始化工作流执行器
 
@@ -139,7 +144,13 @@ class WorkflowExecutor(QObject):
         )
         self.start_card_id = start_card_id
         self.images_dir = images_dir
+        self.sounds_dir = sounds_dir
+        self.dicts_dir = dicts_dir
+        self.yolo_dir = yolo_dir
+        self.replays_dir = replays_dir
+        self.plugins_dir = plugins_dir
         self.get_image_data = get_image_data
+        self._bind_resource_dirs()
         self.test_mode = test_mode  # 测试模式
         self.workflow_id = self._normalize_workflow_id(workflow_id)
         self.workflow_filepath = self._normalize_workflow_filepath(workflow_filepath)
@@ -925,7 +936,7 @@ class WorkflowExecutor(QObject):
     def _format_workflow_scope_label(workflow_scope: Any = "main", workflow_name: Optional[str] = None) -> str:
         """统一格式化主/子工作流标签，避免悬浮窗侧重复拼接。"""
         scope_key = str(workflow_scope or "main").strip().lower()
-        if scope_key in {"sub", "sub_workflow", "child", "child_workflow"}:
+        if scope_key == "sub":
             clean_name = str(workflow_name or "").strip()
             return f"子工作流:{clean_name}" if clean_name else "子工作流"
         return "主工作流"
@@ -1269,12 +1280,27 @@ class WorkflowExecutor(QObject):
         finally:
             self._start_gate_event = None
 
+    def _bind_resource_dirs(self) -> None:
+        from task_workflow.resource_context import bind_resource_dirs
+
+        bind_resource_dirs(
+            {
+                "images_dir": self.images_dir,
+                "sounds_dir": self.sounds_dir,
+                "dicts_dir": getattr(self, "dicts_dir", "") or "",
+                "yolo_dir": getattr(self, "yolo_dir", "") or "",
+                "replays_dir": getattr(self, "replays_dir", "") or "",
+                "plugins_dir": getattr(self, "plugins_dir", "") or "",
+            }
+        )
+
     def run(self):
         """主执行方法，在线程中运行"""
         if self._is_running:
             logger.warning("工作流已在运行中")
             return
 
+        self._bind_resource_dirs()
         self._is_running = True
         # 只清暂停：启动前已登记的停止请求应当生效，而不是被新一轮 run() 抹掉。
         self.run_context.resume()
@@ -1349,10 +1375,9 @@ class WorkflowExecutor(QObject):
         # 环境变量应该由调用方（单窗口执行器或多窗口执行器）负责设置
         logger.info(f"WorkflowExecutor启动: 窗口='{self.target_window_title}', 模式={self.execution_mode}, HWND={self.target_hwnd}")
 
-        if WIN32GUI_AVAILABLE and self.target_hwnd and not win32gui.IsWindow(self.target_hwnd):
-            recovered_hwnd = self._try_recover_window_handle()
+        if WIN32GUI_AVAILABLE and self.target_hwnd:
+            recovered_hwnd = self._ensure_live_target_hwnd()
             if recovered_hwnd:
-                logger.info(f"启动时重连目标窗口: {self.target_hwnd} => {recovered_hwnd}")
                 self.target_hwnd = recovered_hwnd
 
         logger.info("开始执行工作流")
@@ -1484,7 +1509,6 @@ class WorkflowExecutor(QObject):
             cleanup_yolo_runtime_on_stop(
                 release_engine=True,
                 compact_memory=True,
-                cleanup_subprocess=True,
             )
         except Exception as e:
             logger.debug(f"清理YOLO运行态资源时出错: {e}")
@@ -1690,33 +1714,133 @@ class WorkflowExecutor(QObject):
         except Exception as e:
             logger.warning(f"后台释放按键 {key_str} 失败: {e}")
 
-    def _try_recover_window_handle(self) -> int:
-        """
-        尝试恢复失效的窗口句柄
+    def _invalidate_stale_capture(self, *hwnds: Any) -> None:
+        """窗口重建后清掉旧截图会话和插件绑定，避免继续抓失效画面。"""
+        seen = set()
+        for raw_hwnd in hwnds:
+            try:
+                handle = int(raw_hwnd or 0)
+            except (TypeError, ValueError):
+                continue
+            if handle <= 0 or handle in seen:
+                continue
+            seen.add(handle)
+            try:
+                from services.screenshot_pool import clear_screenshot_cache, cleanup_screenshot_engine_runtime
 
-        Returns:
-            新的窗口句柄，恢复失败返回0
-        """
+                clear_screenshot_cache(handle)
+                cleanup_screenshot_engine_runtime(hwnd=handle)
+            except Exception as exc:
+                logger.debug("清理失效窗口截图缓存失败: hwnd=%s err=%s", handle, exc)
+            try:
+                from utils.plugin.session import unbind_shared_plugin_windows
+
+                unbind_shared_plugin_windows(handle)
+            except Exception as exc:
+                logger.debug("解除失效窗口插件绑定失败: hwnd=%s err=%s", handle, exc)
+
+    def _is_target_window_current(self) -> bool:
+        """当前句柄是否仍指向绑定的那扇窗口。句柄被系统复用时 IsWindow 仍为真。"""
+        from utils.window.window_identity import hwnd_matches_identity, is_window_alive, match_bound_window
+
+        try:
+            hwnd = int(self.target_hwnd or 0)
+            if hwnd <= 0:
+                return False
+            if not WIN32GUI_AVAILABLE:
+                return True
+            if not is_window_alive(hwnd):
+                return False
+            matched = match_bound_window(
+                getattr(self, "bound_windows", None),
+                hwnd=hwnd,
+                title=self.target_window_title,
+                bind_id=getattr(self, "target_bind_id", None),
+                enabled_only=True,
+            )
+            if matched is None:
+                return True
+            return hwnd_matches_identity(hwnd, matched)
+        except Exception:
+            return False
+
+    def _ensure_live_target_hwnd(self) -> int:
+        """句柄失效或被复用时按绑定身份重连。找不到则返回 0。"""
+        try:
+            old_hwnd = int(self.target_hwnd or 0)
+        except (TypeError, ValueError):
+            old_hwnd = 0
+        if self._is_target_window_current():
+            return old_hwnd
+        logger.warning("目标窗口句柄已失效 (HWND: %s)，尝试按窗口特征重连", old_hwnd)
+        recovered_hwnd = self._try_recover_window_handle()
+        if recovered_hwnd:
+            logger.info("目标窗口句柄已重连: %s => %s", old_hwnd, recovered_hwnd)
+            return int(recovered_hwnd)
+        return 0
+
+    def _try_recover_window_handle(self) -> int:
+        """按绑定身份恢复失效句柄。找不到唯一目标时返回 0，不按标题猜。"""
         if not WIN32GUI_AVAILABLE:
             return 0
 
-        window_title = self.target_window_title
-        if not window_title and not self.target_hwnd:
+        from utils.window.window_identity import (
+            apply_window_identity,
+            is_window_alive,
+            match_bound_window,
+            refresh_bound_windows,
+        )
+
+        try:
+            old_hwnd = int(self.target_hwnd or 0)
+        except (TypeError, ValueError):
+            old_hwnd = 0
+        bound_windows = getattr(self, "bound_windows", None)
+        if isinstance(bound_windows, list) and bound_windows:
+            try:
+                refresh_bound_windows(bound_windows)
+            except Exception as exc:
+                logger.debug("刷新绑定窗口句柄失败: %s", exc)
+
+        matched = match_bound_window(
+            bound_windows,
+            hwnd=self.target_hwnd,
+            title=self.target_window_title,
+            bind_id=getattr(self, "target_bind_id", None),
+            enabled_only=True,
+        )
+        if matched is None:
+            logger.warning(
+                "[Executor] 未找到可确认的目标窗口，拒绝模糊恢复: title=%s hwnd=%s",
+                self.target_window_title,
+                self.target_hwnd,
+            )
             return 0
 
         try:
-            resolved = self.window_adapter.resolve(
-                WindowBinding(
-                    title=str(window_title or ""),
-                    hwnd=int(self.target_hwnd or 0),
-                )
-            )
+            resolved = self.window_adapter.resolve(WindowBinding.from_mapping(matched))
             new_hwnd = resolved.hwnd
-            if new_hwnd and win32gui.IsWindow(new_hwnd):
-                logger.info(f"[Executor] 通过窗口特征恢复窗口: {window_title} -> {new_hwnd}")
+            if new_hwnd and is_window_alive(new_hwnd):
+                apply_window_identity(matched, new_hwnd)
+                self.target_hwnd = new_hwnd
+                title = str(matched.get("title") or "").strip()
+                if title:
+                    self.target_window_title = title
+                bind_id = str(matched.get("bind_id") or "").strip()
+                if bind_id:
+                    self.target_bind_id = bind_id
+                self._invalidate_stale_capture(old_hwnd, new_hwnd)
+                logger.info(
+                    "[Executor] 通过窗口身份恢复窗口: %s -> %s",
+                    matched.get("title"),
+                    new_hwnd,
+                )
                 return new_hwnd
 
-            logger.warning(f"[Executor] 未找到可确认的目标窗口，拒绝模糊恢复: {window_title}")
+            logger.warning(
+                "[Executor] 未找到可确认的目标窗口，拒绝模糊恢复: %s",
+                matched.get("title"),
+            )
         except Exception as e:
             logger.error(f"[Executor] 恢复窗口句柄异常: {e}")
 
@@ -1915,10 +2039,11 @@ class WorkflowExecutor(QObject):
 
                     return True, "工作流被用户停止"
 
-                # 2. 检查目标窗口是否仍然存在（防止窗口关闭后继续执行导致卡死）
+                # 2. 检查目标窗口是否仍然存在（游戏重启后按身份重连，找不到再停）
                 if self.target_hwnd and WIN32GUI_AVAILABLE:
                     try:
-                        if not win32gui.IsWindow(self.target_hwnd):
+                        recovered_hwnd = self._ensure_live_target_hwnd()
+                        if not recovered_hwnd:
                             logger.warning("目标窗口已关闭，自动停止工作流")
                             self._stop_requested = True
                             self._release_all_keys()
@@ -1929,6 +2054,7 @@ class WorkflowExecutor(QObject):
                             except Exception:
                                 pass
                             return True, "目标窗口已关闭"
+                        self.target_hwnd = recovered_hwnd
                     except Exception as e:
                         logger.warning(f"窗口状态检查异常: {e}")
                         # 检查失败时也停止，避免后续操作出错
@@ -2365,42 +2491,20 @@ class WorkflowExecutor(QObject):
             # 工具 关键修复：优先使用构造函数传入的target_hwnd，避免重新查找导致窗口混乱
             target_hwnd = self.target_hwnd
 
-            # 验证预设的窗口句柄是否有效，失效时尝试自动恢复
+            # 验证预设的窗口句柄是否有效，失效或被复用时按窗口身份重连
             if target_hwnd:
                 try:
                     if not WIN32GUI_AVAILABLE:
                         logger.warning("win32gui 不可用，无法验证窗口句柄")
-                        # 继续执行，因为任务模块可能不需要 win32gui
                     else:
-                        # 检查窗口有效性（带超时保护）
-                        window_valid = False
-                        try:
-                            # 快速检查窗口是否存在且可见
-                            window_valid = win32gui.IsWindow(target_hwnd)
-                        except Exception as check_error:
-                            logger.warning(f"窗口有效性检查失败: {check_error}")
-                            window_valid = False
-
-                        if window_valid:
-                            # 窗口存在，尝试获取标题（可能失败）
-                            try:
-                                actual_title = win32gui.GetWindowText(target_hwnd)
-                                logger.debug(f"成功 使用预设窗口句柄: {target_hwnd} -> '{actual_title}'")
-                            except Exception:
-                                # 获取标题失败但窗口存在，继续执行
-                                logger.debug(f"成功 使用预设窗口句柄: {target_hwnd} (无法获取标题)")
+                        recovered_hwnd = self._ensure_live_target_hwnd()
+                        if recovered_hwnd:
+                            target_hwnd = recovered_hwnd
                         else:
-                            logger.warning(f"目标窗口已关闭 (HWND: {target_hwnd})，尝试按窗口特征重连")
-                            recovered_hwnd = self._try_recover_window_handle()
-                            if recovered_hwnd and win32gui.IsWindow(recovered_hwnd):
-                                self.target_hwnd = recovered_hwnd
-                                target_hwnd = recovered_hwnd
-                                logger.info(f"目标窗口句柄已重连: {recovered_hwnd}")
-                            else:
-                                detail = "目标窗口不存在或已关闭"
-                                logger.error(f"工作流已自动停止：{detail}")
-                                self._stop_requested = True
-                                return _finalize_failure(detail=detail)
+                            detail = "目标窗口不存在或已关闭"
+                            logger.error(f"工作流已自动停止：{detail}")
+                            self._stop_requested = True
+                            return _finalize_failure(detail=detail)
                 except Exception as e:
                     logger.error(f"错误 验证预设窗口句柄时出错: {e}")
                     # 发生异常时也停止工作流，避免继续执行导致卡死
@@ -2447,6 +2551,12 @@ class WorkflowExecutor(QObject):
                             bound_windows=getattr(self, "bound_windows", None),
                             custom_width=getattr(self, "custom_width", 0),
                             custom_height=getattr(self, "custom_height", 0),
+                            images_dir=self.images_dir,
+                            sounds_dir=self.sounds_dir,
+                            dicts_dir=self.dicts_dir,
+                            yolo_dir=self.yolo_dir,
+                            replays_dir=self.replays_dir,
+                            plugins_dir=self.plugins_dir,
                         )
 
                     # 工具 修复：检查返回值是否为None，防止解包错误

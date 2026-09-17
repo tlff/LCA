@@ -9,6 +9,12 @@ logger = logging.getLogger(__name__)
 
 
 class MainWindowDialogMixin:
+    def open_ai_workflow_assistant(self):
+        """打开独立的 AI 助手窗口。"""
+        from ui.dialogs.ai_assistant_dialog import open_ai_assistant_dialog
+
+        open_ai_assistant_dialog(self)
+
     def open_export_standalone_dialog(self):
         from ui.export_parts.export_dialog import StandaloneExportDialog
 

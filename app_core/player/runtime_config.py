@@ -32,6 +32,7 @@ PACKAGED_RUNTIME_KEYS = (
     "plugin_bind_mode",
     "plugin_text_ime",
     "plugin_fake_active",
+    "plugin_public",
     "binding_method",
     "multi_window_delay",
     "custom_width",

@@ -206,11 +206,15 @@ class DictMakerDialog(QDialog):
         *,
         target_hwnd: Optional[int] = None,
         params: Optional[Dict[str, Any]] = None,
+        images_dir: str = "",
+        dicts_dir: str = "",
     ):
         super().__init__(parent)
         self.setWindowTitle("制作点阵字库")
         self._hwnd = int(target_hwnd or 0)
         self._params = dict(params or {})
+        self._images_dir = str(images_dir or "").strip()
+        self._dicts_dir_value = str(dicts_dir or "").strip()
         self._roi: Optional[np.ndarray] = None
         self._binary: Optional[np.ndarray] = None
         self._region: Tuple[int, int, int, int] = (0, 0, 0, 0)
@@ -417,17 +421,29 @@ class DictMakerDialog(QDialog):
         self.status_label.setStyleSheet(f"color: {muted};")
 
     def _load_initial_state(self) -> None:
-        path = str(self._params.get("dict_file") or "").strip()
+        from task_workflow.resource_path import unwrap_resource_path
+
+        path = unwrap_resource_path(self._params.get("dict_file")) or ""
         if path:
             self.path_edit.setText(path)
         color = str(self._params.get("color_format") or "").strip()
         if color:
             self.color_edit.setText(color)
 
-    def _browse_file(self) -> None:
+    def _dicts_dir(self) -> str:
+        from task_workflow.resource_context import current_dicts_dir
+
+        if self._dicts_dir_value:
+            return self._dicts_dir_value
+        bound = str(current_dicts_dir() or "").strip()
+        if bound:
+            return bound
         from utils.app_paths import get_dicts_dir
 
-        start = str(self.path_edit.text() or "").strip() or get_dicts_dir("LCA")
+        return get_dicts_dir("LCA")
+
+    def _browse_file(self) -> None:
+        start = str(self.path_edit.text() or "").strip() or self._dicts_dir()
         path, _ = QFileDialog.getOpenFileName(
             self,
             "选择字库文件",
@@ -438,12 +454,10 @@ class DictMakerDialog(QDialog):
             self.path_edit.setText(path)
 
     def _new_file(self) -> None:
-        from utils.app_paths import get_dicts_dir
-
         path, _ = QFileDialog.getSaveFileName(
             self,
             "新建字库文件",
-            os.path.join(get_dicts_dir("LCA"), "ui.txt"),
+            os.path.join(self._dicts_dir(), "ui.txt"),
             "字库文件 (*.txt);;所有文件 (*.*)",
         )
         if not path:

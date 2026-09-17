@@ -54,7 +54,9 @@ class WorkflowTask(QObject):
 
     def __init__(self, task_id: int, name: str, filepath: str, workflow_data: dict,
                  task_modules: Dict[str, Any], images_dir: str, config: dict,
-                 parent=None):
+                 parent=None, sounds_dir: str = None,
+                 dicts_dir: str = None, yolo_dir: str = None,
+                 replays_dir: str = None, plugins_dir: str = None):
         """
         初始化工作流任务
 
@@ -77,18 +79,20 @@ class WorkflowTask(QObject):
         self.workflow_data = workflow_data
         self.lca_session = None
         self.lca_session_path = ""
-        if str(filepath or "").lower().endswith(".lca"):
+        self.host_workflow_filepath = ""
+        self.host_logical_path = ""
+        if str(filepath or "").lower().endswith(".lca") and not str(filepath or "").startswith("memory://"):
             from app_core.lca_format.session import get_for_path
 
             self.lca_session = get_for_path(filepath)
             self.lca_session_path = os.path.abspath(filepath)
-        elif str(filepath or "").startswith("memory://"):
-            from app_core.lca_format.session import get_active, get_active_path
-
-            self.lca_session = get_active()
-            self.lca_session_path = get_active_path()
         self.task_modules = task_modules
         self.images_dir = images_dir
+        self.sounds_dir = sounds_dir
+        self.dicts_dir = dicts_dir
+        self.yolo_dir = yolo_dir
+        self.replays_dir = replays_dir
+        self.plugins_dir = plugins_dir
         self.config = config
 
         # 任务状态
@@ -105,7 +109,7 @@ class WorkflowTask(QObject):
         self._stop_lock = Lock()  # 停止锁（停止保护）
         self._cleanup_lock = Lock()  # 清理锁（清理保护）
         self._status_lock = Lock()  # 状态锁（状态更新保护）
-        self._overlay_hide_delay_ms = 180
+        self._overlay_hide_delay_ms = 0
         self._overlay_hide_request_token = 0
 
         # 执行配置（继承全局配置）
@@ -162,16 +166,10 @@ class WorkflowTask(QObject):
             logger.debug(f"任务 '{self.name}' 加载YOLO画框模块失败: {exc}")
             return
 
-        if action == "hide":
-            hide_detections_overlay()
-            return
-
         try:
             hwnd = as_hwnd(payload.get("hwnd"))
         except Exception:
-            return
-        if hwnd == 0:
-            return
+            hwnd = 0
 
         detections = payload.get("detections")
         if not isinstance(detections, list):
@@ -184,6 +182,17 @@ class WorkflowTask(QObject):
                 normalized_frame_shape = tuple(int(v) for v in tuple(frame_shape)[:3])
             except Exception:
                 normalized_frame_shape = None
+
+        if str(self.status) in {"stopped", "stopping", "completed", "failed"}:
+            hide_detections_overlay()
+            return
+
+        if action == "hide" or hwnd == 0 or not detections:
+            if hwnd == 0:
+                hide_detections_overlay()
+            else:
+                draw_detections_on_window(hwnd, [], normalized_frame_shape)
+            return
 
         draw_detections_on_window(hwnd, detections, normalized_frame_shape)
 
@@ -749,6 +758,11 @@ class WorkflowTask(QObject):
             execution_mode=self.execution_mode,
             screenshot_engine=self.config.get("screenshot_engine"),
             images_dir=self.images_dir,
+            sounds_dir=self.sounds_dir,
+            dicts_dir=self.dicts_dir,
+            yolo_dir=self.yolo_dir,
+            replays_dir=self.replays_dir,
+            plugins_dir=self.plugins_dir,
             workflow_id=workflow_id,
             workflow_filepath=self.filepath,
             start_card_ids=session_start_card_ids,
@@ -894,6 +908,58 @@ class WorkflowTask(QObject):
         self.modified = True
         logger.debug(f"任务 '{self.name}' 工作流数据已更新")
 
+    def _save_into_host_package(self, workflow_data: dict = None) -> bool:
+        host = str(getattr(self, "host_workflow_filepath", "") or "").strip()
+        logical = str(getattr(self, "host_logical_path", "") or "").strip()
+        if not host or not logical:
+            logger.error("子工作流未绑定父工程，无法保存")
+            return False
+        try:
+            save_data = (workflow_data if workflow_data is not None else self.workflow_data).copy()
+            from task_workflow.workflow_sanitize import sanitize_workflow_data
+
+            sanitize_workflow_data(save_data)
+            if workflow_data is not None:
+                self.workflow_data["cards"] = workflow_data.get("cards", [])
+                self.workflow_data["connections"] = workflow_data.get("connections", [])
+                if isinstance(workflow_data.get("metadata"), dict):
+                    self.workflow_data["metadata"] = workflow_data.get("metadata")
+            save_data["jump_config"] = {
+                "enabled": self.jump_enabled,
+                "rules": self.jump_rules.copy(),
+                "delay": self.jump_delay,
+                "first_execute": self.first_execute,
+            }
+            save_data["window_binding"] = {
+                "bound_window_id": self.bound_window_id,
+                "target_window_title": self.target_window_title,
+                "target_hwnd": self.target_hwnd,
+            }
+            from app_core.lca_format.project_io import load_lca_from_bytes, write_nested_workflow
+            from app_core.lca_format.session import get_for_path, register_temporary
+
+            write_nested_workflow(
+                host,
+                logical,
+                save_data,
+                source_session=self.lca_session,
+                display_name=os.path.splitext(os.path.basename(logical))[0],
+            )
+            host_session = get_for_path(host)
+            nested_bytes = host_session.get_bytes(logical) if host_session is not None else None
+            if nested_bytes is None:
+                raise FileNotFoundError(f"写回后未找到子工作流: {logical}")
+            _nested_data, nested_session = load_lca_from_bytes(nested_bytes)
+            nested_path = register_temporary(nested_session)
+            self.lca_session = nested_session
+            self.lca_session_path = nested_path
+            self.modified = False
+            logger.info("子工作流已写回父工程: %s -> %s", logical, host)
+            return True
+        except Exception as exc:
+            logger.error("子工作流写回父工程失败: %s", exc, exc_info=True)
+            return False
+
     def save(self, workflow_data: dict = None) -> bool:
         """
         保存任务到文件
@@ -905,6 +971,9 @@ class WorkflowTask(QObject):
         if not self.filepath:
             logger.warning(f"任务 '{self.name}' 没有保存路径，需要先另存为")
             return False
+
+        if str(self.filepath).startswith("memory://"):
+            return self._save_into_host_package(workflow_data)
 
         restore_active_path = ""
         temporarily_activated = False
@@ -918,6 +987,16 @@ class WorkflowTask(QObject):
             if file_dir and not os.path.exists(file_dir):
                 logger.info(f"创建目录: {file_dir}")
                 os.makedirs(file_dir, exist_ok=True)
+            from task_workflow.workspace import (
+                ensure_workflow_resource_subdirs,
+                extract_workflow_resource_path,
+            )
+
+            resource_root = extract_workflow_resource_path(
+                workflow_data if workflow_data is not None else self.workflow_data
+            )
+            if resource_root:
+                ensure_workflow_resource_subdirs(resource_root)
 
             # 创建保存数据，包含工作流和跳转配置
             # 如果提供了workflow_data，使用它；否则使用self.workflow_data

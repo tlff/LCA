@@ -111,16 +111,18 @@ def get_app_root() -> str:
 def get_user_data_dir(app_name: str = "LCA") -> str:
     override = str(os.getenv("LCA_USER_DATA_DIR", "") or "").strip()
     if override:
-        return _ensure_dir(_to_long_path(os.path.abspath(os.path.expandvars(override))))
-    portable = str(os.getenv("LCA_PORTABLE", "") or "").strip().lower()
-    if portable in {"1", "true", "yes", "on"}:
-        return _ensure_dir(get_app_root())
-    local_app_data = str(os.getenv("LOCALAPPDATA", "") or "").strip()
-    if not local_app_data:
-        local_app_data = os.path.join(os.path.expanduser("~"), "AppData", "Local")
-    return _ensure_dir(
-        _to_long_path(os.path.join(os.path.abspath(local_app_data), str(app_name or "LCA")))
-    )
+        path = _to_long_path(os.path.abspath(os.path.expandvars(override)))
+    else:
+        local_app_data = str(os.getenv("LOCALAPPDATA", "") or "").strip()
+        if not local_app_data:
+            local_app_data = os.path.join(os.path.expanduser("~"), "AppData", "Local")
+        path = _to_long_path(
+            os.path.join(os.path.abspath(local_app_data), str(app_name or "LCA"))
+        )
+    app_root = os.path.normcase(os.path.abspath(get_app_root()))
+    if os.path.normcase(os.path.abspath(path)) == app_root:
+        raise RuntimeError("用户数据目录不能是程序根目录")
+    return _ensure_dir(path)
 
 
 def _ensure_dir(path: str) -> str:
@@ -148,6 +150,16 @@ def get_favorites_path(app_name: str = "LCA") -> str:
     return os.path.join(get_user_data_dir(app_name), "workflow_favorites.json")
 
 
+def get_universal_config_path(app_name: str = "LCA") -> str:
+    return os.path.join(get_user_data_dir(app_name), "universal_system_config.json")
+
+
+def get_ai_sessions_path(app_name: str = "LCA") -> str:
+    slot = _instance_slot()
+    filename = "ai_sessions.json" if slot <= 1 else f"ai_sessions.instance-{slot}.json"
+    return os.path.join(get_user_data_dir(app_name), filename)
+
+
 def get_images_dir(app_name: str = "LCA") -> str:
     return _ensure_dir(os.path.join(get_user_data_dir(app_name), "images"))
 
@@ -160,7 +172,15 @@ def get_sounds_dir(app_name: str = "LCA") -> str:
     return _ensure_dir(os.path.join(get_user_data_dir(app_name), "sounds"))
 
 
-def normalize_workflow_image_path(raw_path: str, app_name: str = "LCA") -> str:
+def get_plugin_dir() -> str:
+    return os.path.join(get_app_root(), "tools", "plugin")
+
+
+def normalize_workflow_image_path(
+    raw_path: str,
+    app_name: str = "LCA",
+    images_dir: str = "",
+) -> str:
     value = str(raw_path or "").strip()
     if not value or value.startswith("memory://"):
         return value
@@ -177,7 +197,8 @@ def normalize_workflow_image_path(raw_path: str, app_name: str = "LCA") -> str:
         return normalized_text
 
     absolute_value = os.path.abspath(value)
-    images_root = os.path.abspath(get_images_dir(app_name))
+    custom_root = str(images_dir or "").strip()
+    images_root = os.path.abspath(custom_root) if custom_root else os.path.abspath(get_images_dir(app_name))
     absolute_normcase = os.path.normcase(absolute_value)
     images_normcase = os.path.normcase(images_root)
     if absolute_normcase == images_normcase:

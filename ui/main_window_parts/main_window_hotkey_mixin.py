@@ -768,18 +768,17 @@ class MainWindowHotkeyMixin:
             try:
                 # 获取当前活动的参数面板
                 param_panel = getattr(self, 'param_panel', None)
-                if param_panel and hasattr(param_panel, '_is_recording_panel_active'):
-                    if param_panel._is_recording_panel_active:
-                        # 触发参数面板的回放功能
-                        if hasattr(param_panel, '_on_replay_hotkey'):
-                            param_panel._on_replay_hotkey()
-                            logger.info("✓ 已触发参数面板的回放功能")
-                        else:
-                            logger.warning("参数面板未实现回放功能")
+                if param_panel is None:
+                    param_panel = getattr(self, 'parameter_panel', None)
+                replay_running = bool(getattr(param_panel, "_replay_active", False)) if param_panel else False
+                if param_panel and (replay_running or getattr(param_panel, "_is_recording_panel_active", False)):
+                    if hasattr(param_panel, '_on_replay_hotkey'):
+                        param_panel._on_replay_hotkey()
+                        logger.info("✓ 已触发参数面板的回放功能")
                     else:
-                        logger.info("提示：请先打开录制回放参数面板才能使用回放功能")
+                        logger.warning("参数面板未实现回放功能")
                 else:
-                    logger.info("提示：回放功能需要在参数面板中使用")
+                    logger.info("提示：请先打开录制回放参数面板才能使用回放功能")
             except Exception as e:
                 logger.error(f"触发回放功能失败: {e}")
                 import traceback

@@ -11,7 +11,8 @@ from app_core.player.package import (
     normalize_player_ui,
     resolve_player_theme,
 )
-from utils.app_paths import get_app_root, get_images_dir, get_sounds_dir, get_user_data_dir
+from task_workflow.workspace import resolve_runtime_resource_dirs
+from utils.app_paths import get_app_root, get_images_dir, get_plugin_dir, get_sounds_dir, get_user_data_dir
 
 
 def rewrite_ui_assets_to_local(ui: Mapping[str, Any], asset_map: Mapping[str, str]) -> dict:
@@ -103,8 +104,13 @@ def build_dev_player_package(
             "entry_script_id": str(entry_script_id or "").strip(),
         }
     )
-    images = str(images_dir or "").strip() or get_images_dir("LCA")
-    sounds = str(sounds_dir or "").strip() or get_sounds_dir("LCA")
+    resource_dirs = resolve_runtime_resource_dirs(
+        workflow_data,
+        workflow_filepath=str(parent_workflow_file or ""),
+        default_images_dir=str(images_dir or "").strip() or get_images_dir("LCA"),
+    )
+    images = str(resource_dirs.get("images_dir") or images_dir or "").strip() or get_images_dir("LCA")
+    sounds = str(resource_dirs.get("sounds_dir") or sounds_dir or "").strip() or get_sounds_dir("LCA")
     entry = str(parent_workflow_file or "").strip() or "dev://current-workflow"
     export_root = get_app_root()
     scripts_payload: dict[str, dict] = {}
@@ -118,6 +124,10 @@ def build_dev_player_package(
         userdata_dir=str(get_user_data_dir("LCA")),
         assets_images_dir=images,
         assets_sounds_dir=sounds,
+        assets_dicts_dir=str(resource_dirs.get("dicts_dir") or ""),
+        assets_replays_dir=str(resource_dirs.get("replays_dir") or ""),
+        assets_yolo_dir=str(resource_dirs.get("yolo_dir") or ""),
+        assets_plugins_dir=str(resource_dirs.get("plugins_dir") or "") or get_plugin_dir(),
         entry_workflow_path=entry,
         manifest=manifest,
         ui=local_ui,

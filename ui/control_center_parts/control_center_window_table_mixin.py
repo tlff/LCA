@@ -1,16 +1,18 @@
 import logging
 from typing import Any, Dict, List, Optional
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QSize, Qt
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QDialog,
     QHBoxLayout,
     QLabel,
+    QListWidget,
+    QListWidgetItem,
     QMenu,
+    QMessageBox,
     QPushButton,
     QTableWidgetItem,
-    QTextEdit,
     QVBoxLayout,
 )
 
@@ -421,7 +423,6 @@ class ControlCenterWindowTableMixin:
 
         window_title = self.format_window_title(window_info.get("title", "未知窗口"), row)
         window_id = self._window_runtime_id(window_info, row)
-        workflows = self._get_window_workflows(window_id)
 
         dialog = QDialog(self)
         dialog.setWindowTitle(f"窗口详情 - {window_title}")
@@ -440,23 +441,53 @@ class ControlCenterWindowTableMixin:
         header_label.setWordWrap(True)
         layout.addWidget(header_label)
 
-        workflow_view = QTextEdit(dialog)
-        workflow_view.setReadOnly(True)
-        if workflows:
-            workflow_lines = []
-            for index, workflow_info in enumerate(workflows, start=1):
-                name = str(workflow_info.get("name") or f"工作流{index}").strip() or f"工作流{index}"
+        workflow_list = QListWidget(dialog)
+        workflow_list.setSelectionMode(QListWidget.SelectionMode.SingleSelection)
+
+        def _fill_workflow_list() -> None:
+            workflow_list.clear()
+            current = self._get_window_workflows(window_id)
+            if not current:
+                empty_item = QListWidgetItem("当前未分配工作流")
+                empty_item.setFlags(Qt.ItemFlag.NoItemFlags)
+                workflow_list.addItem(empty_item)
+                return
+            for index, workflow_info in enumerate(current):
+                name = str(workflow_info.get("name") or f"工作流{index + 1}").strip() or f"工作流{index + 1}"
                 file_path = str(workflow_info.get("file_path") or "").strip()
-                workflow_lines.append(f"{index}. {name}")
+                text = f"{index + 1}. {name}"
                 if file_path:
-                    workflow_lines.append(file_path)
-                workflow_lines.append("")
-            workflow_view.setPlainText("\n".join(workflow_lines).strip())
-        else:
-            workflow_view.setPlainText("当前未分配工作流")
-        layout.addWidget(workflow_view, 1)
+                    text = f"{text}\n{file_path}"
+                item = QListWidgetItem(text)
+                item.setData(Qt.ItemDataRole.UserRole, index)
+                item.setToolTip(file_path or name)
+                item.setSizeHint(QSize(0, 48))
+                workflow_list.addItem(item)
+
+        _fill_workflow_list()
+        layout.addWidget(workflow_list, 1)
+
+        def _remove_selected() -> None:
+            item = workflow_list.currentItem()
+            if item is None:
+                QMessageBox.information(dialog, "提示", "请先选择要移除的工作流")
+                return
+            index = item.data(Qt.ItemDataRole.UserRole)
+            if not isinstance(index, int):
+                QMessageBox.information(dialog, "提示", "请先选择要移除的工作流")
+                return
+            if self.remove_window_workflow_at(row, index):
+                header_label.setText(
+                    f"句柄：{hwnd}\n作业：{window_id}\n状态：{self._get_window_status_text(row)}\n当前步骤：{self._get_window_step_text(row)}"
+                )
+                _fill_workflow_list()
 
         button_layout = QHBoxLayout()
+        remove_btn = QPushButton("移除选中工作流")
+        remove_btn.setMinimumHeight(30)
+        remove_btn.setToolTip("从该窗口的分配列表中移除选中的一条工作流")
+        remove_btn.clicked.connect(_remove_selected)
+        button_layout.addWidget(remove_btn)
         button_layout.addStretch(1)
         close_btn = QPushButton("关闭")
         close_btn.setMinimumHeight(30)
@@ -480,6 +511,7 @@ class ControlCenterWindowTableMixin:
 
         menu = apply_unified_menu_style(QMenu(self), frameless=True)
         menu.addAction("分配工作流", lambda row=row: self.assign_workflow_to_window(row))
+        menu.addAction("移除该窗口工作流", lambda row=row: self.remove_workflow_from_window(row))
         menu.addAction("启动任务", lambda row=row: self.start_window_task(row))
         menu.addAction("停止任务", lambda row=row: self.stop_window_task(row))
         menu.addSeparator()

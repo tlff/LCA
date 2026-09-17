@@ -13,7 +13,6 @@ import logging
 from dataclasses import dataclass
 from typing import Mapping, Optional
 
-from utils.capture.engine_ids import is_plugin_screenshot_engine
 from utils.input_simulation.mode_utils import is_plugin_input_backend
 
 logger = logging.getLogger(__name__)
@@ -29,6 +28,7 @@ PLUGIN_BIND_SETTING_KEYS = (
     "plugin_bind_mode",
     "plugin_text_ime",
     "plugin_fake_active",
+    "plugin_public",
 )
 PLUGIN_AUTH_SETTING_KEYS = ("plugin_reg_code", "plugin_extra_code")
 PLUGIN_SETTING_KEYS = PLUGIN_BIND_SETTING_KEYS + PLUGIN_AUTH_SETTING_KEYS
@@ -40,8 +40,7 @@ def plugin_settings_view(config: Optional[Mapping]) -> dict:
 
 
 def _uses_plugin(config: Mapping) -> bool:
-    values = dict(config or {})
-    return is_plugin_input_backend(values) or is_plugin_screenshot_engine(values.get("screenshot_engine"))
+    return is_plugin_input_backend(config)
 
 
 @dataclass(frozen=True)
@@ -94,6 +93,12 @@ def sync_plugin_runtime_after_settings_change(diff: PluginSettingsDiff) -> str:
             logger.warning("注册码变更后终止插件宿主失败: %s", exc)
             return ""
     if diff.bind_changed:
+        try:
+            from utils.input_simulation import global_input_simulator_manager
+
+            global_input_simulator_manager.clear_cache()
+        except Exception as exc:
+            logger.warning("绑定参数变更后清除输入模拟器缓存失败: %s", exc)
         try:
             from utils.plugin.session import unbind_shared_plugin_windows
 

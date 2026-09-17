@@ -251,20 +251,12 @@ _ib_dispatch(method, args) {
     }
 
     if method = "key_down" {
-        key := _ib_normalize_key(_ib_arg(args, 1, ""))
-        if key = ""
-            throw Error("empty key")
-        IbSend("{" key " down}")
-        _ib_track_key_down(key)
+        _ib_key_down(_ib_arg(args, 1, ""))
         return []
     }
 
     if method = "key_up" {
-        key := _ib_normalize_key(_ib_arg(args, 1, ""))
-        if key = ""
-            throw Error("empty key")
-        IbSend("{" key " up}")
-        _ib_track_key_up(key)
+        _ib_key_up(_ib_arg(args, 1, ""))
         return []
     }
 
@@ -279,18 +271,15 @@ _ib_dispatch(method, args) {
 
         keyDownSent := false
         try {
-            IbSend("{" key " down}")
+            _ib_key_down(key)
             keyDownSent := true
-            _ib_track_key_down(key)
             if holdMs > 0
-                _ib_precise_hold_sleep_ms(holdMs)
-            IbSend("{" key " up}")
+                _ib_hold_with_typematic(key, holdMs)
+            _ib_key_up(key)
             keyDownSent := false
-            _ib_track_key_up(key)
         } finally {
             if keyDownSent {
-                try IbSend("{" key " up}")
-                _ib_track_key_up(key)
+                try _ib_key_up(key)
             }
         }
         return []
@@ -314,38 +303,21 @@ _ib_dispatch(method, args) {
             }
         }
 
-        chordText := _ib_build_modifier_chord_text(heldKeys, key)
-        if chordText != "" {
-            ; Logitech 后端对跨请求/显式 down-up 修饰状态不稳定；
-            ; AHK 热键语法会在单次 SendInput 内生成标准修饰组合。
-            IbSend(chordText)
-            _ib_track_key_up(key)
-            return []
-        }
-
-        downText := ""
         for _, heldKey in heldKeys {
-            downText .= "{" heldKey " down}"
-            _ib_track_key_down(heldKey)
+            _ib_key_down(heldKey)
         }
-        downText .= "{" key " down}"
 
         keyDownSent := false
         try {
-            ; Logitech/IbInputSimulator 需要把修饰键与主键放在同一次 IbSend 中，
-            ; 否则 hook 在多次请求之间开关后，目标可能只收到裸主键。
-            IbSend(downText)
+            _ib_key_down(key)
             keyDownSent := true
-            _ib_track_key_down(key)
             if holdMs > 0
-                _ib_precise_hold_sleep_ms(holdMs)
-            IbSend("{" key " up}")
+                _ib_hold_with_typematic(key, holdMs)
+            _ib_key_up(key)
             keyDownSent := false
-            _ib_track_key_up(key)
         } finally {
             if keyDownSent {
-                try IbSend("{" key " up}")
-                _ib_track_key_up(key)
+                try _ib_key_up(key)
             }
         }
         return []
@@ -366,8 +338,7 @@ _ib_dispatch(method, args) {
             throw Error("empty hotkey")
 
         for _, keyName in keys {
-            IbSend("{" keyName " down}")
-            _ib_track_key_down(keyName)
+            _ib_key_down(keyName)
         }
 
         _ib_precise_hold_sleep_ms(_ib_random_press_hold_ms())
@@ -375,8 +346,7 @@ _ib_dispatch(method, args) {
         Loop keys.Length {
             idx := keys.Length - A_Index + 1
             keyName := keys[idx]
-            IbSend("{" keyName " up}")
-            _ib_track_key_up(keyName)
+            _ib_key_up(keyName)
         }
         return []
     }
@@ -464,54 +434,107 @@ _ib_track_key_up(keyName) {
         _ib_pressed_keys.Delete(key)
 }
 
-_ib_build_modifier_chord_text(heldKeys, keyName) {
-    if !IsObject(heldKeys) || heldKeys.Length < 1
-        return ""
-
-    prefix := ""
-    seen := Map()
-    for _, heldKey in heldKeys {
-        token := _ib_modifier_prefix_token(heldKey)
-        if token = ""
-            return ""
-        if seen.Has(token)
-            continue
-        seen[token] := true
-        prefix .= token
-    }
-
-    if prefix = ""
-        return ""
-
-    return prefix _ib_key_send_token(keyName)
-}
-
-_ib_modifier_prefix_token(keyName) {
-    key := StrLower(Trim(keyName))
-    if key = "ctrl" || key = "control" || key = "lctrl" || key = "rctrl"
-        return "^"
-    if key = "alt" || key = "lalt" || key = "ralt"
-        return "!"
-    if key = "shift" || key = "lshift" || key = "rshift"
-        return "+"
-    if key = "lwin" || key = "rwin" || key = "win"
-        return "#"
-    return ""
-}
-
-_ib_key_send_token(keyName) {
-    key := Trim(keyName)
+_ib_key_down(keyName) {
+    key := _ib_normalize_key(keyName)
     if key = ""
-        return ""
+        throw Error("empty key")
+    _ib_send_key_event(key, true)
+    _ib_track_key_down(key)
+}
 
-    lowerKey := StrLower(key)
-    if StrLen(key) = 1 {
-        if RegExMatch(lowerKey, "^[a-z0-9]$")
-            return lowerKey
-        return "{" key "}"
+_ib_key_up(keyName) {
+    key := _ib_normalize_key(keyName)
+    if key = ""
+        throw Error("empty key")
+    _ib_send_key_event(key, false)
+    _ib_track_key_up(key)
+}
+
+_ib_send_key_event(keyName, keyDown) {
+    ; 不走 IbSend("{key down}")：它每次开关 SendInput hook，罗技后端会把已按下的键冲掉，
+    ; 自定义脚本 按键("right", 秒=4) 就会变成只点一下。
+    vk := GetKeyVK(keyName)
+    if vk = 0
+        throw Error("unknown key")
+    sc := GetKeySC(keyName)
+    KEYEVENTF_EXTENDEDKEY := 0x0001
+    KEYEVENTF_KEYUP := 0x0002
+    flags := 0
+    if (sc & 0x100)
+        flags |= KEYEVENTF_EXTENDEDKEY
+    if !keyDown
+        flags |= KEYEVENTF_KEYUP
+    DllCall("IbInputSimulator\IbSend_keybd_event", "UChar", vk, "UChar", sc & 0xFF, "UInt", flags, "UPtr", 0)
+}
+
+_ib_keyboard_repeat_delay_ms() {
+    ; SPI_GETKEYBOARDDELAY: 0..3 → (n+1)*250 毫秒
+    delay := 0
+    if !DllCall("User32\SystemParametersInfoW", "UInt", 0x16, "UInt", 0, "Int*", &delay, "UInt", 0, "Int")
+        throw Error("读取键盘重复延迟失败")
+    if delay < 0 || delay > 3
+        throw Error("键盘重复延迟无效")
+    return (delay + 1) * 250
+}
+
+_ib_keyboard_repeat_interval_ms() {
+    ; SPI_GETKEYBOARDSPEED: 0..31 → 约 2.5~30 次/秒
+    speed := 0
+    if !DllCall("User32\SystemParametersInfoW", "UInt", 0x0A, "UInt", 0, "Int*", &speed, "UInt", 0, "Int")
+        throw Error("读取键盘重复速率失败")
+    if speed < 0 || speed > 31
+        throw Error("键盘重复速率无效")
+    rps := 2.5 + speed * (27.5 / 31.0)
+    return 1000.0 / rps
+}
+
+_ib_hold_with_typematic(key, holdMs) {
+    ; 人手按住会先停顿再连发。罗技 HID 按住不会连发，必须在同一驱动通道上补 make/break。
+    targetMs := _ib_to_number(holdMs, 0.0)
+    if targetMs <= 0
+        return
+
+    delayMs := _ib_keyboard_repeat_delay_ms()
+    intervalMs := _ib_keyboard_repeat_interval_ms()
+
+    static qpf := 0
+    if qpf = 0 {
+        freq := 0
+        DllCall("Kernel32\QueryPerformanceFrequency", "Int64*", &freq)
+        qpf := freq
     }
+    if qpf <= 0
+        throw Error("高精度计时不可用")
 
-    return "{" key "}"
+    startCounter := 0
+    DllCall("Kernel32\QueryPerformanceCounter", "Int64*", &startCounter)
+    targetTicks := targetMs * qpf / 1000.0
+
+    firstMs := delayMs
+    if firstMs > targetMs
+        firstMs := targetMs
+    _ib_precise_hold_sleep_ms(firstMs)
+
+    Loop {
+        nowCounter := 0
+        DllCall("Kernel32\QueryPerformanceCounter", "Int64*", &nowCounter)
+        elapsedTicks := nowCounter - startCounter
+        if elapsedTicks >= targetTicks
+            break
+
+        _ib_key_up(key)
+        _ib_key_down(key)
+
+        nowCounter := 0
+        DllCall("Kernel32\QueryPerformanceCounter", "Int64*", &nowCounter)
+        remainingMs := ((targetTicks - (nowCounter - startCounter)) * 1000.0) / qpf
+        if remainingMs <= 0
+            break
+        slice := intervalMs
+        if slice > remainingMs
+            slice := remainingMs
+        _ib_precise_hold_sleep_ms(slice)
+    }
 }
 
 _ib_track_mouse_button_down(buttonName, x := "", y := "") {
@@ -541,7 +564,7 @@ _ib_release_all_inputs() {
         pendingKeys.Push(keyName)
 
     for _, keyName in pendingKeys {
-        try IbSend("{" keyName " up}")
+        try _ib_key_up(keyName)
     }
 
     pendingButtons := []
@@ -591,14 +614,29 @@ _ib_mouse_up(button, x := "", y := "") {
     }
 }
 
+_ib_send_mouse_button_event(btn, downOrUp) {
+    ; 不走 IbMouseClick：罗技后端在开关 SendInput hook 时可能只吃移动包，按下/松开被丢掉。
+    MOUSEEVENTF_LEFTDOWN := 0x0002
+    MOUSEEVENTF_LEFTUP := 0x0004
+    MOUSEEVENTF_RIGHTDOWN := 0x0008
+    MOUSEEVENTF_RIGHTUP := 0x0010
+    MOUSEEVENTF_MIDDLEDOWN := 0x0020
+    MOUSEEVENTF_MIDDLEUP := 0x0040
+    isDown := (downOrUp = "D")
+    if btn = "Right"
+        flags := isDown ? MOUSEEVENTF_RIGHTDOWN : MOUSEEVENTF_RIGHTUP
+    else if btn = "Middle"
+        flags := isDown ? MOUSEEVENTF_MIDDLEDOWN : MOUSEEVENTF_MIDDLEUP
+    else
+        flags := isDown ? MOUSEEVENTF_LEFTDOWN : MOUSEEVENTF_LEFTUP
+    DllCall("IbInputSimulator\IbSend_mouse_event", "UInt", flags, "UInt", 0, "UInt", 0, "UInt", 0, "UPtr", 0)
+}
+
 _ib_emit_button_event_at_target(btn, tx, ty, downOrUp) {
-    global _ib_driver_name
     ; D/U 事件始终携带目标坐标，禁止使用当前坐标发包。
     ; 这样即使发生瞬时指针扰动，也不会退化为“在原位置点击”。
-    if _ib_driver_name = "logitech" || _ib_driver_name = "logitechghubnew" {
-        ; Logitech 的 MouseClick Hook 会返回成功，但部分驱动版本只处理移动包。
-        ; 直接调用 DLL 的按钮事件接口，确保按下/松开进入罗技驱动。
-        IbMouseButtonEvent(btn, downOrUp)
+    if _ib_is_logitech_driver() {
+        _ib_send_mouse_button_event(btn, downOrUp)
         return
     }
     IbMouseClick(btn, tx, ty, 1, 0, downOrUp)

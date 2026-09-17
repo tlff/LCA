@@ -36,8 +36,6 @@ YOLO_REMOVED_ACTION_PARAM_KEYS = (
     "position_mode",
     "random_offset_x",
     "random_offset_y",
-    "refresh_classes",
-    "target_classes",
     "target_selection",
 )
 

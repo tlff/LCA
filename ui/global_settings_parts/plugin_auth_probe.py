@@ -24,7 +24,7 @@ def start_plugin_auth_probe(
     extra_code: str,
     on_finished: Callable[[bool, str], None],
 ) -> Optional[threading.Thread]:
-    """异步验证注册码；同一 owner 上未完成的验证会被忽略，避免重复注册。"""
+    """异步验证注册码；宿主会先确认免注册激活，再执行 Ver + Reg。"""
     running = getattr(owner, "_plugin_auth_probe_thread", None)
     if running is not None and running.is_alive():
         return None

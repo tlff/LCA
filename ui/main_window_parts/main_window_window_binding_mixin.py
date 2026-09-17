@@ -11,6 +11,7 @@ from utils.window.window_binding_utils import (
     get_window_binding_mode,
     sync_runtime_window_binding_state,
 )
+from utils.window.hwnd_utils import hwnds_equal
 from utils.window.window_identity import match_bound_window, refresh_bound_windows
 from .main_window_support import normalize_execution_mode
 
@@ -311,14 +312,11 @@ class MainWindowWindowBindingMixin:
 
             return False
 
-        # 检查句柄是否在绑定列表中
-
-        for window in self.bound_windows:
-
-            if window.get('hwnd') == hwnd:
-
+        for window in self.bound_windows or []:
+            if not isinstance(window, dict):
+                continue
+            if hwnds_equal(window.get("hwnd"), hwnd) or hwnds_equal(window.get("display_hwnd"), hwnd):
                 return True
-
         return False
 
     def validate_hwnd_or_get_first(self, hwnd):

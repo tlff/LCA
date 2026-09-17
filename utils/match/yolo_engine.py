@@ -20,7 +20,6 @@ from pathlib import Path
 import cv2
 import numpy as np
 import onnxruntime as ort
-from utils.app_paths import get_app_root
 
 logger = logging.getLogger(__name__)
 
@@ -167,16 +166,19 @@ class YOLOONNXEngine:
         self._initialized = True
 
     def _resolve_model_path(self) -> Path:
-        path = Path(self.model_path)
-        if path.is_absolute():
-            if path.is_file():
-                return path
-            raise FileNotFoundError(f"模型文件不存在: {path}")
+        from task_workflow.resource_path import unwrap_resource_path
+        from task_workflow.script_resources import resolve_resource_path
 
-        candidate = Path(get_app_root()) / self.model_path
-        if candidate.is_file():
-            return candidate
-        raise FileNotFoundError(f"模型文件不存在: {candidate}")
+        text = unwrap_resource_path(self.model_path) or ""
+        if not text:
+            raise FileNotFoundError("模型路径为空")
+        located = resolve_resource_path(text, enforce_jail=False)
+        if located and Path(located).is_file():
+            return Path(located)
+        path = Path(text)
+        if path.is_file():
+            return path
+        raise FileNotFoundError(f"模型文件不存在: {text}")
 
     def _load_model(self) -> bool:
         """加载ONNX模型"""
@@ -352,8 +354,7 @@ class YOLOONNXEngine:
         logger.warning("未在 ONNX 元数据或 classes.txt 中找到类别名，将使用 class_id 标签")
 
     def _preprocess(self, image: np.ndarray) -> Tuple[np.ndarray, float, Tuple[int, int]]:
-        """预处理图像"""
-        # 获取输入尺寸
+        """BGR 图做居中 letterbox，再转 RGB/NCHW。返回 (tensor, gain, (pad_left, pad_top))。"""
         input_height = self._input_shape[2] if len(self._input_shape) > 2 else 640
         input_width = self._input_shape[3] if len(self._input_shape) > 3 else 640
 
@@ -361,26 +362,41 @@ class YOLOONNXEngine:
             input_height = self._input_size_override
             input_width = self._input_size_override
 
-        # 保持宽高比缩放
+        input_height = int(input_height)
+        input_width = int(input_width)
+
         h, w = image.shape[:2]
-        scale = min(input_width / w, input_height / h)
-        new_w, new_h = int(w * scale), int(h * scale)
+        gain = min(input_width / w, input_height / h)
+        new_w = int(round(w * gain))
+        new_h = int(round(h * gain))
+        if (new_w, new_h) != (w, h):
+            resized = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+        else:
+            resized = image
 
-        # 缩放图像
-        resized = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+        dw = input_width - new_w
+        dh = input_height - new_h
+        pad_w = dw / 2
+        pad_h = dh / 2
+        top, bottom = int(round(pad_h - 0.1)), int(round(pad_h + 0.1))
+        left, right = int(round(pad_w - 0.1)), int(round(pad_w + 0.1))
+        padded = cv2.copyMakeBorder(
+            resized,
+            top,
+            bottom,
+            left,
+            right,
+            cv2.BORDER_CONSTANT,
+            value=(114, 114, 114),
+        )
 
-        # 填充到模型输入尺寸
-        padded = np.full((input_height, input_width, 3), 114, dtype=np.uint8)
-        padded[:new_h, :new_w] = resized
-
-        # 转换为NCHW格式并归一化
-        input_tensor = padded.transpose(2, 0, 1).astype(np.float32) / 255.0
+        rgb = cv2.cvtColor(padded, cv2.COLOR_BGR2RGB)
+        input_tensor = np.ascontiguousarray(rgb.transpose(2, 0, 1), dtype=np.float32) / 255.0
         input_tensor = np.expand_dims(input_tensor, axis=0)
+        return input_tensor, float(gain), (left, top)
 
-        return input_tensor, scale, (new_w, new_h)
-
-    def _postprocess(self, outputs: List[np.ndarray], scale: float,
-                     orig_shape: Tuple[int, int]) -> List[DetectionResult]:
+    def _postprocess(self, outputs: List[np.ndarray], gain: float,
+                     pad: Tuple[int, int], orig_shape: Tuple[int, int]) -> List[DetectionResult]:
         """后处理检测结果"""
         # YOLOv8输出格式: (1, 84, 8400) 或 (1, num_classes+4, num_boxes)
         predictions = outputs[0]
@@ -408,18 +424,17 @@ class YOLOONNXEngine:
         if len(boxes) == 0:
             return []
 
-        # 转换为x1y1x2y2格式
+        pad_left, pad_top = pad
+        orig_h, orig_w = orig_shape
         x_center, y_center, w, h = boxes[:, 0], boxes[:, 1], boxes[:, 2], boxes[:, 3]
-        x1 = x_center - w / 2
-        y1 = y_center - h / 2
-        x2 = x_center + w / 2
-        y2 = y_center + h / 2
-
-        # 缩放回原图尺寸
-        x1 = (x1 / scale).astype(int)
-        y1 = (y1 / scale).astype(int)
-        x2 = (x2 / scale).astype(int)
-        y2 = (y2 / scale).astype(int)
+        x1 = (x_center - w / 2 - pad_left) / gain
+        y1 = (y_center - h / 2 - pad_top) / gain
+        x2 = (x_center + w / 2 - pad_left) / gain
+        y2 = (y_center + h / 2 - pad_top) / gain
+        x1 = np.clip(x1, 0, orig_w).astype(int)
+        y1 = np.clip(y1, 0, orig_h).astype(int)
+        x2 = np.clip(x2, 0, orig_w).astype(int)
+        y2 = np.clip(y2, 0, orig_h).astype(int)
 
         # NMS
         boxes_for_nms = np.column_stack([x1, y1, x2, y2])
@@ -484,7 +499,7 @@ class YOLOONNXEngine:
             t0 = time.perf_counter()
 
             # 预处理
-            input_tensor, scale, _ = self._preprocess(image)
+            input_tensor, gain, pad = self._preprocess(image)
             orig_shape = image.shape[:2]
             t1 = time.perf_counter()
 
@@ -493,7 +508,7 @@ class YOLOONNXEngine:
             t2 = time.perf_counter()
 
             # 后处理
-            detections = self._postprocess(outputs, scale, orig_shape)
+            detections = self._postprocess(outputs, gain, pad, orig_shape)
             t3 = time.perf_counter()
 
             # 类别过滤
@@ -567,18 +582,16 @@ class YOLOONNXEngine:
 
     def _capture_window(self, hwnd: int, execution_mode: str = "background") -> Optional[np.ndarray]:
         """捕获窗口截图。"""
-        # 复用统一截图引擎，避免重复实现截图逻辑
         try:
+            from utils.capture.engine_ids import is_supported_screenshot_engine
             from utils.capture.screenshot_helper import (
                 _capture_with_engine,
                 get_screenshot_engine,
                 probe_dxgi_runtime_available,
             )
 
-            img_bgr = None
-            engine_used = None
             current_engine = get_screenshot_engine()
-            if current_engine not in {"dxgi", "gdi", "wgc", "printwindow"}:
+            if not is_supported_screenshot_engine(current_engine):
                 logger.error(
                     "YOLO 截图引擎不受支持，当前引擎=%s",
                     current_engine,
@@ -599,9 +612,8 @@ class YOLOONNXEngine:
                 engine=current_engine,
                 timeout=0.8,
             )
-            engine_used = current_engine
             if img_bgr is None:
-                logger.error("YOLO 截图失败：句柄=%s，引擎=%s", hwnd, engine_used)
+                logger.error("YOLO 截图失败：句柄=%s，引擎=%s", hwnd, current_engine)
                 return None
             return img_bgr
         except Exception as e:

@@ -268,10 +268,10 @@ def execute_mouse_scroll(params: Dict[str, Any], counters: Dict[str, int], execu
     target_x, target_y = None, None
     current_scroll_target_hwnd = target_hwnd
 
-    raw_image_path = params.get('image_path') # 原始图片路径
-
-    # 【闪退修复】路径纠正：自动从images目录匹配同名图片
+    from task_workflow.resource_path import unwrap_resource_path
     from tasks.task_utils import correct_single_image_path
+
+    raw_image_path = unwrap_resource_path(params.get('image_path')) or ""
     image_path_param = correct_single_image_path(raw_image_path, card_id) if raw_image_path else None
 
     confidence_val = float(params.get('confidence', 0.8))

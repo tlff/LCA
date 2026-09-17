@@ -148,26 +148,20 @@ def _load_class_names_from_onnx(model_path: Path) -> List[str]:
 
 def get_model_classes(model_path: str = "") -> List[str]:
     """获取模型类别列表（支持ONNX）"""
-    if not model_path or not model_path.strip():
+    from task_workflow.resource_path import unwrap_resource_path
+
+    text = unwrap_resource_path(model_path) or ""
+    if not text:
         return ["全部类别"]
 
     try:
-        # 解析路径
-        path = Path(model_path)
+        from task_workflow.script_resources import resolve_resource_path
+
+        located = resolve_resource_path(text, enforce_jail=False)
+        path = Path(located) if located else Path(text)
         if not path.exists():
-            project_root = Path(__file__).parent.parent
-            candidates = [
-                project_root / model_path,
-                project_root / "yolo" / path.name,
-                Path(model_path),
-            ]
-            for candidate in candidates:
-                if candidate.exists():
-                    path = candidate
-                    break
-            else:
-                logger.warning(f"模型文件不存在: {model_path}")
-                return ["全部类别"]
+            logger.warning(f"模型文件不存在: {text}")
+            return ["全部类别"]
 
         # ONNX模型：优先读取模型元数据，其次读取classes.txt
         if path.suffix.lower() == '.onnx':
@@ -249,7 +243,9 @@ def execute_task(params: Dict[str, Any], counters: Dict[str, int], execution_mod
         except Exception:
             return False
 
-    model_path = params.get('model_path', 'yolo/yolov8n.onnx')
+    from task_workflow.resource_path import unwrap_resource_path
+
+    model_path = unwrap_resource_path(params.get('model_path')) or 'yolo/yolov8n.onnx'
     conf_threshold = params.get('confidence_threshold', 0.5)
     iou_threshold = params.get('iou_threshold', 0.45)
     target_classes_str = params.get('target_classes', '')
@@ -283,17 +279,17 @@ def execute_task(params: Dict[str, Any], counters: Dict[str, int], execution_mod
             probe_dxgi_runtime_available,
         )
 
+        from utils.capture.engine_ids import is_supported_screenshot_engine, screenshot_engine_label
+
         current_engine = get_screenshot_engine()
-        allowed_engines = {"dxgi", "gdi", "wgc", "printwindow"}
-        if current_engine not in allowed_engines:
+        if not is_supported_screenshot_engine(current_engine):
             logger.error(
                 "YOLO 截图引擎不受支持，当前引擎=%s",
                 current_engine,
             )
             warning_message = (
-                "YOLO限制：截图引擎仅支持 DXGI / GDI / WGC / PrintWindow，"
-                "当前引擎: {engine}。"
-            ).format(engine=current_engine)
+                "YOLO限制：截图引擎不受支持，当前引擎: {engine}。"
+            ).format(engine=screenshot_engine_label(current_engine) or current_engine)
             return _stop_with_warning(warning_message)
 
         if current_engine == "dxgi":
@@ -605,6 +601,15 @@ def get_params_definition() -> Dict[str, Dict[str, Any]]:
             "label": "模型路径", "type": "file",
             "file_types": ["ONNX模型 (*.onnx)", "所有文件 (*.*)"],
             "default": "", "tooltip": "仅支持ONNX格式模型",
+        },
+        "target_classes": {
+            "label": "目标类别",
+            "type": "select",
+            "options": ["全部类别"],
+            "default": "全部类别",
+            "options_func": "get_model_classes",
+            "source_param": "model_path",
+            "tooltip": "只检测选中的类别；全部类别表示不筛选",
         },
         "confidence_threshold": {
             "label": "置信度阈值", "type": "float",

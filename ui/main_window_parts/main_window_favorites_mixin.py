@@ -3,10 +3,12 @@ import os
 from typing import List
 
 from task_workflow.workspace import (
+    apply_updated_workflow_resource_dir,
+    extract_workflow_resource_path,
     favorite_path_key,
-    get_effective_workflow_images_dir,
     load_workspace_favorites_snapshot,
     resolve_existing_workflow_path,
+    resource_runtime_kwargs,
     save_workspace_favorites_snapshot,
 )
 
@@ -81,6 +83,7 @@ class MainWindowFavoritesMixin:
             self.workflow_tab_widget.set_all_card_snap_enabled(card_snap_enabled)
             if hasattr(self, 'parameter_panel') and self.parameter_panel:
                 self.parameter_panel.set_snap_to_parent_enabled(self.config.get('enable_parameter_panel_snap', True))
+            self._offer_workspace_if_missing()
         except Exception as e:
             logger.error(f"自动加载工作流时出错: {e}")
     def _load_checked_favorite_workflow_paths(self) -> List[str]:
@@ -202,24 +205,146 @@ class MainWindowFavoritesMixin:
             return bool(workspaces or favorites or extra_paths)
         except Exception:
             return False
-    def _refresh_open_workflow_gallery_dir(self, filepath: str, gallery_dir: str, workflow_data: dict | None = None) -> None:
-        """同步已打开工作流的图库目录与缓存元数据。"""
+    def _refresh_open_workflow_resource_dir(self, filepath: str, resource_dir: str, workflow_data: dict | None = None) -> None:
+        """按文件路径同步已打开工作流的资源目录。"""
         task = self.task_manager.find_task_by_filepath(filepath)
         if not task:
             return
-        if isinstance(workflow_data, dict):
-            task.workflow_data = workflow_data
-        task.images_dir = get_effective_workflow_images_dir(
-            task.workflow_data,
-            getattr(self, 'images_dir', ''),
+        self._sync_open_task_resource_state(task, resource_dir, workflow_data)
+
+    def _sync_saved_task_resources(self, task, workflow_data: dict | None = None) -> None:
+        data = workflow_data if isinstance(workflow_data, dict) else getattr(task, "workflow_data", None)
+        resource_dir = extract_workflow_resource_path(data) if isinstance(data, dict) else ""
+        self._sync_open_task_resource_state(
+            task,
+            resource_dir,
+            data if isinstance(data, dict) else None,
         )
-        workflow_view = self.workflow_tab_widget.task_views.get(task.task_id)
+
+    def _sync_open_task_resource_state(self, task, resource_dir: str = "", workflow_data: dict | None = None) -> None:
+        """把打开中的任务切到当前工程资源目录：目录、会话、缓存、面板、脚本资源栏。"""
+        resource_dirs = apply_updated_workflow_resource_dir(
+            task,
+            resource_dir,
+            workflow_data,
+            getattr(self, "images_dir", "") or "",
+        )
+        self._reload_open_task_lca_session(task, str(getattr(task, "filepath", "") or ""))
+        try:
+            from utils.image_paths import get_image_path_resolver
+
+            get_image_path_resolver().clear_cache()
+        except Exception:
+            logger.debug("清除图片路径缓存失败", exc_info=True)
+        workflow_view = None
+        if getattr(self, "workflow_tab_widget", None):
+            workflow_view = self.workflow_tab_widget.task_views.get(task.task_id)
         if workflow_view is not None:
             workflow_view.images_dir = task.images_dir
-            metadata = task.workflow_data.get('metadata') if isinstance(task.workflow_data, dict) else {}
+            metadata = task.workflow_data.get("metadata") if isinstance(task.workflow_data, dict) else {}
             workflow_view.workflow_metadata = dict(metadata) if isinstance(metadata, dict) else {}
-        current_task_id = self.workflow_tab_widget.get_current_task_id() if self.workflow_tab_widget else None
-        if current_task_id != task.task_id:
+        self._rebind_script_editors_for_task(task, resource_dirs)
+        current_task_id = None
+        if getattr(self, "workflow_tab_widget", None):
+            current_task_id = self.workflow_tab_widget.get_current_task_id()
+        if current_task_id == task.task_id:
+            self._bind_current_workflow_resource_dirs(task)
+        else:
+            self._bind_current_workflow_resource_dirs()
+
+    def _reload_open_task_lca_session(self, task, filepath: str) -> None:
+        from app_core.lca_format.project_io import is_lca_path, load_lca_project
+        from app_core.lca_format.session import (
+            activate,
+            clear_path,
+            deactivate,
+            get_active,
+            get_active_path,
+            register,
+        )
+
+        old_path = str(getattr(task, "lca_session_path", "") or "").strip()
+        was_active = False
+        try:
+            active = get_active()
+            was_active = active is getattr(task, "lca_session", None)
+            if not was_active and old_path:
+                active_path = get_active_path()
+                was_active = bool(active_path) and os.path.normcase(
+                    os.path.abspath(old_path)
+                ) == os.path.normcase(os.path.abspath(active_path))
+        except Exception:
+            was_active = False
+        current_id = None
+        if getattr(self, "workflow_tab_widget", None):
+            current_id = self.workflow_tab_widget.get_current_task_id()
+        should_activate = was_active or current_id == getattr(task, "task_id", None)
+        if is_lca_path(filepath) and os.path.isfile(filepath):
+            try:
+                _payload, session = load_lca_project(filepath)
+                register(filepath, session)
+                task.lca_session = session
+                task.lca_session_path = os.path.abspath(filepath)
+                if should_activate:
+                    activate(filepath)
+            except Exception:
+                logger.warning("重新加载工作流工程会话失败: %s", filepath, exc_info=True)
+            if (
+                old_path
+                and os.path.normcase(os.path.abspath(old_path))
+                != os.path.normcase(os.path.abspath(filepath))
+            ):
+                clear_path(old_path)
             return
-        if hasattr(self, 'parameter_panel') and self.parameter_panel:
-            self.parameter_panel.images_dir = task.images_dir
+        task.lca_session = None
+        task.lca_session_path = ""
+        if old_path:
+            clear_path(old_path)
+            if should_activate:
+                deactivate()
+
+    def _rebind_script_editors_for_task(self, task, dirs) -> None:
+        editors = getattr(self, "_script_editors", None)
+        if not editors:
+            return
+        card_ids = set()
+        data = getattr(task, "workflow_data", None)
+        if isinstance(data, dict):
+            for card in data.get("cards") or []:
+                if isinstance(card, dict) and isinstance(card.get("id"), int):
+                    card_ids.add(card["id"])
+        if getattr(self, "workflow_tab_widget", None):
+            view = self.workflow_tab_widget.task_views.get(task.task_id)
+            if view is not None:
+                card_ids.update(getattr(view, "cards", {}).keys())
+        kwargs = resource_runtime_kwargs(dirs)
+        for card_id, editor in list(editors.items()):
+            if card_id not in card_ids:
+                continue
+            panel = getattr(editor, "_resource_panel", None)
+            if panel is None or not hasattr(panel, "bind"):
+                continue
+            token = ""
+            try:
+                from ui.dialogs.script_capture import _workflow_token_of
+
+                token = _workflow_token_of(editor)
+            except Exception:
+                token = ""
+            try:
+                panel.bind(
+                    kwargs.get("images_dir") or "",
+                    card_id,
+                    token,
+                    kwargs.get("sounds_dir") or "",
+                    dicts_dir=kwargs.get("dicts_dir") or "",
+                    yolo_dir=kwargs.get("yolo_dir") or "",
+                    replays_dir=kwargs.get("replays_dir") or "",
+                    plugins_dir=kwargs.get("plugins_dir") or "",
+                )
+                source = ""
+                if hasattr(editor, "editor"):
+                    source = str(editor.editor.toPlainText() or "")
+                panel.set_source(source)
+            except Exception:
+                logger.debug("刷新脚本资源栏失败: card_id=%s", card_id, exc_info=True)

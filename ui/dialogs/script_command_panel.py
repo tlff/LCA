@@ -37,10 +37,6 @@ def script_action_button_size(widget) -> tuple:
     return width, height
 
 
-def script_action_button_width(widget) -> int:
-    return script_action_button_size(widget)[0]
-
-
 class ScriptCommandPanel(QWidget):
     """分组命令列表，支持筛选后插入。"""
 
@@ -107,6 +103,7 @@ class ScriptCommandPanel(QWidget):
 
     def _populate(self) -> None:
         self._tree.clear()
+        seen_names = set()
         for group in SCRIPT_INSERT_GROUPS:
             parent = QTreeWidgetItem([str(group.get("title") or "")])
             parent.setFlags(Qt.ItemFlag.ItemIsEnabled)
@@ -115,6 +112,9 @@ class ScriptCommandPanel(QWidget):
                 if not isinstance(item, dict):
                     continue
                 name = str(item.get("name") or "")
+                if not name or name in seen_names:
+                    continue
+                seen_names.add(name)
                 child = QTreeWidgetItem([name])
                 child.setData(0, Qt.ItemDataRole.UserRole, item)
                 child.setToolTip(0, "\n".join(split_command_signatures(str(item.get("signature") or name))))

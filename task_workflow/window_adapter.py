@@ -16,6 +16,7 @@ class WindowBinding:
     bind_id: str = ""
     class_name: str = ""
     process_name: str = ""
+    instance_key: str = ""
 
     @classmethod
     def from_mapping(cls, value: Optional[Mapping[str, Any]]) -> "WindowBinding":
@@ -26,6 +27,7 @@ class WindowBinding:
             bind_id=str(source.get("bind_id") or ""),
             class_name=str(source.get("class_name") or ""),
             process_name=str(source.get("process_name") or ""),
+            instance_key=str(source.get("instance_key") or ""),
         )
 
     def as_mapping(self) -> dict[str, Any]:
@@ -35,6 +37,7 @@ class WindowBinding:
             "bind_id": self.bind_id,
             "class_name": self.class_name,
             "process_name": self.process_name,
+            "instance_key": self.instance_key,
         }
 
 
@@ -49,6 +52,7 @@ class WindowAdapter:
                 bind_id=binding.bind_id,
                 class_name=binding.class_name,
                 process_name=binding.process_name,
+                instance_key=binding.instance_key,
             )
         resolved = binding.as_mapping()
         resolved["hwnd"] = hwnd

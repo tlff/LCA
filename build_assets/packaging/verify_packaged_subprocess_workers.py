@@ -323,6 +323,7 @@ def _verify_build_modules(build_dir: Path) -> tuple[bool, list[str]]:
         "module.services.rapidocr_ocr_service.c",
         "module.services.screenshot_pool.c",
         "module.task_workflow.process_worker.c",
+        "module.task_workflow.external_component_worker.c",
         "module.utils.capture.dxgi_capture.c",
         "module.dxcam.c",
     ]

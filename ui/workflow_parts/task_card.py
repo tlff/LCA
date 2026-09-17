@@ -645,8 +645,8 @@ class TaskCard(QGraphicsObject):
         self._width = width
         self._height = height
         self.update()
-        for connection in self._validated_connections():
-            connection.update_path()
+        self._validated_connections()
+        self.view.reroute_connections()
 
     def _validated_connections(self):
         """返回严格登记且属于当前场景的连接，不修改任何状态。"""
@@ -856,6 +856,7 @@ class TaskCard(QGraphicsObject):
             else:
                 self._other_selected_cards_start_positions = {}
 
+        self.view.set_canvas_drag_paused(True)
         super().mousePressEvent(event)
 
 
@@ -876,21 +877,12 @@ class TaskCard(QGraphicsObject):
             self._refresh_dragged_connections()
 
     def _refresh_dragged_connections(self):
-        """在多选卡片完成同一帧位置更新后统一刷新受影响连线。"""
+        """在多选卡片完成同一帧位置更新后统一刷新连线预览。"""
+        self._did_preview_connections = True
         cards = [self]
-        cards.extend(getattr(self, '_other_selected_cards_start_positions', {}).keys())
-        connections = []
-        seen = set()
-        for card in cards:
-            for connection in list(getattr(card, 'connections', [])):
-                marker = id(connection)
-                if marker in seen:
-                    continue
-                seen.add(marker)
-                connections.append(connection)
-        for connection in connections:
-            if connection.scene() is self.scene():
-                connection.update_path()
+        others = getattr(self, "_other_selected_cards_start_positions", None) or {}
+        cards.extend(others.keys())
+        self.view.preview_moving_card_connections(cards)
 
     def mouseReleaseEvent(self, event: QGraphicsSceneMouseEvent):
         """Handle mouse release and finalize dragging state."""
@@ -898,15 +890,10 @@ class TaskCard(QGraphicsObject):
         partner_starts = dict(getattr(self, '_other_selected_cards_start_positions', {}) or {})
         was_multi_dragging = getattr(self, '_dragging_multi_selection', False)
         partner_cards = list(partner_starts.keys())
-
-        self._dragging_multi_selection = False
-        self._other_selected_cards_start_positions = {}
-        self._drag_start_pos = None
-        self._drag_start_card_pos = None
-        self._is_dragging = False
+        did_preview = bool(getattr(self, "_did_preview_connections", False))
         for card in partner_cards:
-            card._is_dragging = False
-            card._multi_dragging_member = False
+            if getattr(card, "_did_preview_connections", False):
+                did_preview = True
 
         self._release_drag_check_timer()
         self._clear_snap_guide_lines()
@@ -916,8 +903,19 @@ class TaskCard(QGraphicsObject):
         if start_pos is not None and not was_multi_dragging:
             self._apply_grid_snap()
             self._apply_snap_alignment()
+            did_preview = did_preview or bool(getattr(self, "_did_preview_connections", False))
 
         self._drag_start_card_pos_for_snap = None
+        self._dragging_multi_selection = False
+        self._other_selected_cards_start_positions = {}
+        self._drag_start_pos = None
+        self._drag_start_card_pos = None
+        self._is_dragging = False
+        self._did_preview_connections = False
+        for card in partner_cards:
+            card._is_dragging = False
+            card._multi_dragging_member = False
+            card._did_preview_connections = False
 
         moved_cards = []
         if start_pos is not None and self.pos() != start_pos:
@@ -929,15 +927,24 @@ class TaskCard(QGraphicsObject):
             notify = getattr(self.view, "_notify_cards_moved", None)
             if callable(notify):
                 notify(moved_cards)
+        if did_preview or moved_cards:
+            targets = moved_cards if moved_cards else [self] + partner_cards
+            self.view.reroute_connections(targets)
+        self.view.set_canvas_drag_paused(False)
 
 
     def _cancel_drag_state(self):
         """取消拖拽状态并清理辅助线，用于异常中断场景。"""
         other_cards = getattr(self, '_other_selected_cards_start_positions', None)
+        did_preview = bool(getattr(self, "_did_preview_connections", False))
         if other_cards:
             for card in list(other_cards.keys()):
+                if getattr(card, "_did_preview_connections", False):
+                    did_preview = True
+                card._did_preview_connections = False
                 card._is_dragging = False
                 card._multi_dragging_member = False
+        self._did_preview_connections = False
         self._dragging_multi_selection = False
         self._other_selected_cards_start_positions = {}
         self._drag_start_pos = None
@@ -947,6 +954,12 @@ class TaskCard(QGraphicsObject):
         self._clear_snap_guide_lines()
         # 停止拖拽检测定时器
         self._release_drag_check_timer()
+        if did_preview:
+            targets = [self]
+            if other_cards:
+                targets.extend(other_cards.keys())
+            self.view.reroute_connections(targets)
+        self.view.set_canvas_drag_paused(False)
 
 
     def mouseDoubleClickEvent(self, event: QGraphicsSceneMouseEvent):
@@ -1110,8 +1123,8 @@ class TaskCard(QGraphicsObject):
     def get_port_pos(self, side: str, port_type: str = PORT_TYPE_SEQUENTIAL) -> QPointF:
         rect = self.boundingRect()
         center_y = rect.center().y()
-
-        port_inset = self.port_radius + 2
+        # 半格内缩：吸附后左卡右口与右卡左口能落在同一条网格柱上，避免口边再横折。
+        port_inset = self._get_size_grid_unit() / 2.0
         spacing = 15
         if port_type == PORT_TYPE_SUCCESS:
             final_y = center_y - spacing
@@ -1271,9 +1284,20 @@ class TaskCard(QGraphicsObject):
         if change == QGraphicsItem.GraphicsItemChange.ItemPositionHasChanged:
             if getattr(self, '_multi_dragging_member', False) or getattr(self, '_dragging_multi_selection', False):
                 return result
+            view = self.view
+            if (
+                getattr(view, "_loading_workflow", False)
+                or getattr(view, "_rerouting_connections", False)
+                or getattr(view, "_undoing_operation", False)
+            ):
+                return result
 
-            for connection in self._validated_connections():
-                connection.update_path()
+            self._validated_connections()
+            if getattr(self, "_is_dragging", False):
+                self._did_preview_connections = True
+                view.preview_moving_card_connections((self,))
+            else:
+                view.reroute_connections((self,))
 
         return result
 
@@ -1329,9 +1353,6 @@ class TaskCard(QGraphicsObject):
 
         self.setPos(new_x, new_y)
 
-        for connection in self._validated_connections():
-            connection.update_path()
-
     def _apply_grid_snap(self):
         """Apply grid snapping to the current card position."""
         if not self.view:
@@ -1346,9 +1367,6 @@ class TaskCard(QGraphicsObject):
 
         if snapped_x != current_pos.x() or snapped_y != current_pos.y():
             self.setPos(snapped_x, snapped_y)
-
-            for connection in self._validated_connections():
-                connection.update_path()
 
     def _calculate_restricted_outputs(self) -> bool:
         """Calculate whether output ports should be restricted."""
@@ -1410,14 +1428,16 @@ class TaskCard(QGraphicsObject):
                     f"卡片 {self.card_id} 的 {connection.line_type} 连线与当前端口能力冲突"
                 )
 
+        changed = old_restricted != new_restricted
         self.restricted_outputs = new_restricted
-        if old_restricted != new_restricted:
+        if changed:
             self.update()
         for connection in self.connections:
             if connection.scene() is not self.scene():
                 raise RuntimeError(f"卡片 {self.card_id} 的连接未挂载到当前场景")
-            connection.update_path()
-        return old_restricted != new_restricted
+        if changed and not getattr(self.view, "_loading_workflow", False):
+            self.view.reroute_connections()
+        return changed
     def set_shadow_rendering_enabled(self, enabled: bool) -> None:
         """Enable/disable card shadow rendering for large workflows."""
         self._shadow_rendering_enabled = bool(enabled)
@@ -1568,8 +1588,6 @@ class TaskCard(QGraphicsObject):
             self.update() 
     def hoverLeaveEvent(self, event: QGraphicsSceneHoverEvent):
         """Handle mouse leaving the card area."""
-        if getattr(self, "_is_dragging", False):
-            self._cancel_drag_state()
         if self.hovered_port_side is not None or self.hovered_port_type is not None:
             self.hovered_port_side = None
             self.hovered_port_type = None
