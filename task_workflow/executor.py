@@ -2390,27 +2390,29 @@ class WorkflowExecutor(QObject):
 
                 # 如果没有指定下一个卡片，根据连接查找
                 if next_card_id is None:
-                    if pending_sequential:
-                        # 已经在多分支队列里：取下一个串行目标
+                    # 先看当前节点自己的 sequential 出向（方案 A3 触发条件）。
+                    # own outgoing 优先于父级 fan-out 队列，避免屏蔽子分支节点自身的后续连接。
+                    sequential_targets = self._graph_engine.next_cards_sequential(current_card_id)
+                    if len(sequential_targets) > 1:
+                        # 当前节点本身是 fan-out 起点：派发自己的多分支
+                        pending_sequential.extend(sequential_targets)
                         next_card_id = pending_sequential.popleft()
-                        logger.debug(
-                            f"[A3 多分支队列] 取出下一个串行节点: {next_card_id}，队列剩余 {len(pending_sequential)}"
+                        logger.info(
+                            f"[A3 多分支] 卡片 {current_card_id} 触发多分支串行，共 {len(sequential_targets)} 个后续: "
+                            f"{list(sequential_targets)}"
                         )
                     else:
-                        # 先看 sequential 端口有没有多条出向边（方案 A3 触发条件）
-                        sequential_targets = self._graph_engine.next_cards_sequential(current_card_id)
-                        if len(sequential_targets) > 1:
-                            pending_sequential.extend(sequential_targets)
+                        # 当前节点是单出向 / 无出向：先走自己的下一跳
+                        own_next = self._find_next_card(current_card_id, success)
+                        if own_next is not None:
+                            next_card_id = own_next
+                        elif pending_sequential:
+                            # 当前节点是叶子，跳到父级 fan-out 队列里的下一个兄弟分支
                             next_card_id = pending_sequential.popleft()
-                            logger.info(
-                                f"[A3 多分支] 卡片 {current_card_id} 触发多分支串行，共 {len(sequential_targets)} 个后续: "
-                                f"{list(sequential_targets)}"
+                            logger.debug(
+                                f"[A3 多分支队列] 取出下一个串行节点: {next_card_id}，队列剩余 {len(pending_sequential)}"
                             )
-                        else:
-                            next_card_id = self._find_next_card(
-                                current_card_id,
-                                success,
-                            )
+                        # 否则保持 None，循环退出
 
                 if next_card_id is not None and not self._is_allowed_card_id(next_card_id):
                     error_msg = f"工作流跳转到非法卡片: {next_card_id}"
