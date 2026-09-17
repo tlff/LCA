@@ -474,7 +474,14 @@ class MainWindowExecutionStateMixin:
 
             if reply == QMessageBox.StandardButton.Yes:
 
-                selected_directory = QFileDialog.getExistingDirectory(self, "选择包含缺失图片的文件夹", self.images_dir) # Start in default images dir
+                start_dir = self.images_dir
+                try:
+                    current_task_id = self.workflow_tab_widget.get_current_task_id() if self.workflow_tab_widget else None
+                    task = self.task_manager.get_task(current_task_id) if current_task_id is not None else None
+                    start_dir = str(getattr(task, "images_dir", "") or "") or self.images_dir
+                except Exception:
+                    start_dir = self.images_dir
+                selected_directory = QFileDialog.getExistingDirectory(self, "选择包含缺失图片的文件夹", start_dir)
 
                 if selected_directory:
 

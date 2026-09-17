@@ -13,7 +13,7 @@ from task_workflow.workspace import (
     remove_workspace_workflow,
     resolve_existing_workflow_path,
     resolve_favorite_workspace_dir,
-    update_workflow_gallery_path,
+    update_workflow_resource_path,
     workflow_matches_any,
     workflow_path_keys,
 )
@@ -22,6 +22,26 @@ from task_workflow.workspace import (
     save_workspace_favorites_snapshot,
 )
 
+
+class _FavoritesPathLabel(QLabel):
+    def __init__(self, resource_path: str = "", parent=None):
+        super().__init__(parent)
+        self._resource_path = str(resource_path or "").strip()
+        self.setWordWrap(False)
+        self.setToolTip(self._resource_path)
+        self._apply_elided_text()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._apply_elided_text()
+
+    def _apply_elided_text(self) -> None:
+        prefix = "路径："
+        full_text = prefix + (self._resource_path or "默认路径")
+        width = max(1, self.width())
+        self.setText(self.fontMetrics().elidedText(full_text, Qt.TextElideMode.ElideMiddle, width))
+
+
 class ParameterPanelFavoritesMixin:
 
     def show_favorites(self):
@@ -29,6 +49,8 @@ class ParameterPanelFavoritesMixin:
         """显示工作流收藏列表"""
 
         self._favorites_mode = True
+
+        self._restore_standard_footer_buttons()
 
         self.current_card_id = None
 
@@ -377,27 +399,28 @@ class ParameterPanelFavoritesMixin:
         name_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         content_layout.addWidget(name_label)
 
-        gallery_path = str(fav.get("gallery_path") or "").strip()
-        gallery_label = QLabel(
-            "图库：已设置自定义图库" if gallery_path else "图库：默认图库"
-        )
-        gallery_label.setWordWrap(True)
-        gallery_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-        content_layout.addWidget(gallery_label)
+        resource_path = str(fav.get("resource_path") or "").strip()
+        path_label = _FavoritesPathLabel(resource_path)
+        path_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        content_layout.addWidget(path_label)
 
         layout.addWidget(content_widget, 1)
 
-        gallery_button = QPushButton("自定义图库")
-        gallery_button.setMinimumWidth(96)
-        gallery_button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        resource_button = QPushButton("自定义路径")
+        resource_button.setMinimumWidth(96)
+        resource_button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         is_local_workflow = bool(fav.get("filepath"))
-        gallery_button.setEnabled(is_local_workflow)
-        gallery_button.setToolTip("为当前工作流设置自定义图库目录" if is_local_workflow else "该工作流不支持此操作")
+        resource_button.setEnabled(is_local_workflow)
+        resource_button.setToolTip(
+            "一个工作流一个文件夹：根目录放工作流，资源按 images、sounds、dicts、yolo、replays 分类存放。插件固定在 tools/plugin"
+            if is_local_workflow
+            else "该工作流不支持此操作"
+        )
         if is_local_workflow:
-            gallery_button.clicked.connect(
-                lambda _checked=False, fp=fav["filepath"]: self._on_favorites_gallery_browse(fp)
+            resource_button.clicked.connect(
+                lambda _checked=False, fp=fav["filepath"]: self._on_favorites_resource_browse(fp)
             )
-        layout.addWidget(gallery_button)
+        layout.addWidget(resource_button)
 
         list_item = QListWidgetItem()
         list_item.setSizeHint(QSize(0, 62))
@@ -413,7 +436,7 @@ class ParameterPanelFavoritesMixin:
         item_widget.installEventFilter(selection_filter)
         checkbox.installEventFilter(selection_filter)
         name_label.installEventFilter(selection_filter)
-        gallery_label.installEventFilter(selection_filter)
+        path_label.installEventFilter(selection_filter)
         content_widget.installEventFilter(selection_filter)
         self._favorites_event_filters.append(selection_filter)
 
@@ -588,6 +611,25 @@ class ParameterPanelFavoritesMixin:
             getattr(self, '_favorite_extras', []),
         )
 
+    def _add_favorite_workspace_dir(self, workspace_dir: str) -> str:
+        """添加工作区目录并写入配置。已存在则直接返回规范化路径。"""
+        normalized_workspace = os.path.abspath(os.path.normpath(str(workspace_dir or "").strip())) if workspace_dir else ""
+        if not normalized_workspace or not os.path.isdir(normalized_workspace):
+            return ""
+        if not getattr(self, "_favorite_workspaces", None):
+            config_path = str(getattr(self, "_favorites_config_path", "") or "")
+            if config_path and os.path.exists(config_path):
+                try:
+                    self._sync_workspace_favorites_snapshot()
+                except Exception:
+                    logger.warning("读取工作区配置失败", exc_info=True)
+        workspaces = list(getattr(self, "_favorite_workspaces", []) or [])
+        if normalized_workspace not in workspaces:
+            workspaces.append(normalized_workspace)
+            self._favorite_workspaces = workspaces
+            self._commit_favorites_list()
+        return normalized_workspace
+
     def _on_favorites_add(self):
 
         """添加工作区目录。"""
@@ -610,9 +652,7 @@ class ParameterPanelFavoritesMixin:
 
             return
 
-        self._favorite_workspaces.append(normalized_workspace)
-
-        self._commit_favorites_list()
+        self._add_favorite_workspace_dir(normalized_workspace)
 
     def _on_favorites_add_workflow(self):
 
@@ -987,80 +1027,71 @@ class ParameterPanelFavoritesMixin:
 
         self.workflow_open_requested.emit(filepath)
 
-    def _on_favorites_gallery_browse(self, filepath: str):
-
-        """为单个工作流设置自定义图库目录。"""
-
+    def _on_favorites_resource_browse(self, filepath: str):
+        """为单个工作流设置自定义资源目录。"""
         if not filepath:
-
             return
 
-        gallery_dir = QFileDialog.getExistingDirectory(
-
-            self, "选择自定义图库目录", ""
-
+        resource_dir = QFileDialog.getExistingDirectory(
+            self, "选择工作流文件夹", ""
         )
-
-        normalized_gallery = os.path.abspath(os.path.normpath(gallery_dir)) if gallery_dir else ""
-
-        if not normalized_gallery:
-
+        normalized_resource = os.path.abspath(os.path.normpath(resource_dir)) if resource_dir else ""
+        if not normalized_resource:
             return
 
         try:
-
-            result = update_workflow_gallery_path(filepath, normalized_gallery)
-
+            result = update_workflow_resource_path(filepath, normalized_resource)
         except Exception as e:
-
-            logger.error(f"更新工作流图库路径失败: {e}", exc_info=True)
-
-            QMessageBox.warning(self, "更新失败", f"无法更新图库路径：\n{e}")
-
+            logger.error(f"更新工作流资源路径失败: {e}", exc_info=True)
+            QMessageBox.warning(self, "更新失败", f"无法更新资源路径：\n{e}")
             return
 
         new_filepath = str(result.get('filepath') or filepath)
+        main_window = getattr(self, 'parent_window', None)
+        if main_window and hasattr(main_window, 'task_manager'):
+            open_task = main_window.task_manager.find_task_by_filepath(filepath)
+            if open_task:
+                open_task.filepath = new_filepath
+                open_task.source_ref = new_filepath
         self._remap_favorite_path_lists(filepath, new_filepath)
 
         for fav in self._favorites:
-
             if favorite_path_key(fav.get('filepath')) == favorite_path_key(filepath):
-
-                fav['gallery_path'] = result.get('gallery_path', '')
-
+                resource_path = str(result.get('resource_path') or "").strip()
+                if resource_path:
+                    fav['resource_path'] = resource_path
+                else:
+                    fav.pop('resource_path', None)
+                fav.pop('gallery_path', None)
                 fav['filepath'] = new_filepath
-
                 break
 
         self._save_favorites_config()
 
         if getattr(self, '_favorites_mode', False):
-
             self._refresh_favorites_list()
 
         main_window = getattr(self, 'parent_window', None)
-
-        if main_window and hasattr(main_window, '_refresh_open_workflow_gallery_dir'):
-
+        if main_window and hasattr(main_window, '_refresh_open_workflow_resource_dir'):
             try:
-
-                main_window._refresh_open_workflow_gallery_dir(
+                main_window._refresh_open_workflow_resource_dir(
                     new_filepath,
-                    result.get('gallery_path', ''),
+                    result.get('resource_path', ''),
                     result.get('workflow_data'),
                 )
-
             except Exception:
+                logger.warning("同步已打开工作流资源路径失败", exc_info=True)
 
-                logger.warning("同步已打开工作流图库路径失败", exc_info=True)
-
-        updated_image_count = int(result.get('updated_image_count') or 0)
-
-        QMessageBox.information(
-            self,
-            "图库路径已更新",
-            f"已更新图库路径：\n{normalized_gallery}\n\n自动匹配导入图片数量：{updated_image_count}",
+        resource_path = str(result.get("resource_path") or normalized_resource)
+        copied_count = int(result.get("copied_count") or 0)
+        missing_count = int(result.get("missing_count") or 0)
+        message = (
+            f"工作流文件：\n{new_filepath}\n\n"
+            f"项目文件夹：\n{resource_path}\n\n"
+            f"已复制资源：{copied_count} 个\n"
+            f"未找到：{missing_count} 个"
         )
+        QMessageBox.information(self, "资源路径已更新", message)
 
     def _on_favorites_execute_single(self, filepath: str):
         """兼容旧入口：统一改为启动已勾选的工作流"""
@@ -1122,9 +1153,9 @@ class ParameterPanelFavoritesMixin:
             workspace_dir = str(item.get('workspace_dir') or '').strip()
             if workspace_dir:
                 normalized_item['workspace_dir'] = os.path.normpath(workspace_dir)
-            gallery_path = str(item.get('gallery_path') or '').strip()
-            if gallery_path:
-                normalized_item['gallery_path'] = os.path.normpath(gallery_path)
+            resource_path = str(item.get('resource_path') or '').strip()
+            if resource_path:
+                normalized_item['resource_path'] = os.path.normpath(resource_path)
             source = str(item.get('source') or '').strip()
             if source:
                 normalized_item['source'] = source

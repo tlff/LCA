@@ -217,6 +217,30 @@ class ParameterPanelActionsMixin:
         if self.current_card_id is not None and changed_payload:
             self.parameters_changed.emit(self.current_card_id, changed_payload)
 
+    def _refresh_selects_using_source(self, source_param: str) -> None:
+        source_name = str(source_param or "").strip()
+        if not source_name:
+            return
+        definitions = getattr(self, "param_definitions", {}) or {}
+        source_value = str(self._get_dynamic_source_value(source_name) or "").strip()
+        if not source_value:
+            source_value = str((getattr(self, "current_parameters", {}) or {}).get(source_name) or "").strip()
+        changed: Dict[str, Any] = {}
+        for name, param_def in definitions.items():
+            if not isinstance(param_def, dict):
+                continue
+            if str(param_def.get("source_param") or "").strip() != source_name:
+                continue
+            if param_def.get("type") not in ("select", "choice", "combo"):
+                continue
+            widget = self._get_value_widget(name)
+            if not isinstance(widget, QComboBox):
+                continue
+            options = self._load_dynamic_options(source_value, param_def.get("options_func", ""), param_def)
+            changed.update(self._apply_dynamic_options({name: widget}, options))
+        if changed:
+            self._emit_dynamic_options_changed(changed)
+
     _BACKGROUND_ACTIONS = {
         'test_ocr_output',
         'test_dict_ocr_output',
@@ -310,8 +334,10 @@ class ParameterPanelActionsMixin:
 
     def _start_background_action(self, action: str, action_func, current_params: Dict[str, Any], target_hwnd) -> None:
         import threading
+        from contextvars import copy_context
 
         self._prepare_background_action_ui(action)
+        ctx = copy_context()
 
         def run_action_in_background():
             try:
@@ -323,7 +349,7 @@ class ParameterPanelActionsMixin:
             except Exception as e:
                 logger.error(f"后台执行action失败: {action}, 错误: {e}", exc_info=True)
 
-        thread = threading.Thread(target=run_action_in_background, daemon=True)
+        thread = threading.Thread(target=ctx.run, args=(run_action_in_background,), daemon=True)
         thread.start()
         logger.info(f"已启动后台线程执行action: {action}")
 

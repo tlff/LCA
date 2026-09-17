@@ -43,6 +43,12 @@ from utils.window.window_activation_utils import (
     schedule_overlay_activation_boost,
     show_and_activate_overlay,
 )
+from ui.selectors.selection_adjust import (
+    cursor_for_selection_hit,
+    hit_test_selection,
+    scale_rect_by_wheel,
+    wheel_event_delta_y,
+)
 
 
 def _get_default_images_dir() -> str:
@@ -623,7 +629,7 @@ class ScreenshotOverlay(QWidget):
     def _set_selection_ready(self, ready: bool):
         self.selection_ready = bool(ready)
         if self.selection_ready:
-            self.hint_text = "可拖动微调 | 方向键微调(Shift=5px, Ctrl+方向键缩放) | 点“确定”保存"
+            self.hint_text = "滚轮缩放 | 四角调大小 | 拖动边框移动 | 方向键微调(Shift=5px, Ctrl+方向键缩放) | 点“确定”保存"
             self._release_overlay_input()
             self.confirm_button.show()
             self.reselect_button.show()
@@ -638,51 +644,12 @@ class ScreenshotOverlay(QWidget):
                 self._grab_overlay_input()
 
     def _cursor_for_resize_mode(self, mode: Optional[str]):
-        if mode in ('left', 'right'):
-            return Qt.CursorShape.SizeHorCursor
-        if mode in ('top', 'bottom'):
-            return Qt.CursorShape.SizeVerCursor
-        if mode in ('top_left', 'bottom_right'):
-            return Qt.CursorShape.SizeFDiagCursor
-        if mode in ('top_right', 'bottom_left'):
-            return Qt.CursorShape.SizeBDiagCursor
-        if mode == 'move':
-            return Qt.CursorShape.SizeAllCursor
-        return Qt.CursorShape.CrossCursor
+        return cursor_for_selection_hit(mode)
 
     def _hit_test_resize_mode(self, point: QPoint) -> Optional[str]:
         if not self.selection_ready or self.selection_rect.isEmpty():
             return None
-
-        rect = self.selection_rect
-        margin = self.resize_margin
-
-        in_y = rect.top() - margin <= point.y() <= rect.bottom() + margin
-        in_x = rect.left() - margin <= point.x() <= rect.right() + margin
-        near_left = in_y and abs(point.x() - rect.left()) <= margin
-        near_right = in_y and abs(point.x() - rect.right()) <= margin
-        near_top = in_x and abs(point.y() - rect.top()) <= margin
-        near_bottom = in_x and abs(point.y() - rect.bottom()) <= margin
-
-        if near_left and near_top:
-            return 'top_left'
-        if near_right and near_top:
-            return 'top_right'
-        if near_left and near_bottom:
-            return 'bottom_left'
-        if near_right and near_bottom:
-            return 'bottom_right'
-        if near_left:
-            return 'left'
-        if near_right:
-            return 'right'
-        if near_top:
-            return 'top'
-        if near_bottom:
-            return 'bottom'
-        if rect.contains(point):
-            return 'move'
-        return None
+        return hit_test_selection(point, self.selection_rect, self.resize_margin)
 
     def _update_action_buttons_position(self):
         if not self.selection_ready or self.selection_rect.isEmpty():
@@ -991,6 +958,32 @@ class ScreenshotOverlay(QWidget):
                     return
 
         super().keyPressEvent(event)
+
+    def wheelEvent(self, event):
+        if (
+            not self.selection_ready
+            or self.selection_rect.isEmpty()
+            or self.selecting
+            or self.dragging_selection
+            or self.resizing_selection
+        ):
+            event.ignore()
+            return
+
+        delta_y = wheel_event_delta_y(event)
+        if delta_y == 0:
+            event.accept()
+            return
+
+        bounds = self.client_qt_rect if self.client_qt_rect else self.rect()
+        new_rect = scale_rect_by_wheel(self.selection_rect, bounds, delta_y)
+        new_rect = self._clamp_rect_to_client(new_rect)
+        if new_rect != self.selection_rect:
+            old_rect = QRect(self.selection_rect)
+            self.selection_rect = new_rect
+            self._update_action_buttons_position()
+            self._invalidate_selection_region(old_rect, self.selection_rect)
+        event.accept()
 
     def paintEvent(self, event):
         """Paint overlay."""

@@ -357,6 +357,8 @@ class WorkflowViewIoMixin:
                 raise TypeError(f"第 {index + 1} 条连线的 end_card_id 必须是整数")
             if start_id not in card_ids or end_id not in card_ids:
                 raise ValueError(f"第 {index + 1} 条连线指向不存在的卡片: {start_id} -> {end_id}")
+            if start_id == end_id:
+                raise ValueError(f"第 {index + 1} 条连线不能连接到自己: {start_id}")
             if line_type not in valid_line_types:
                 raise ValueError(f"第 {index + 1} 条连线类型无效: {line_type!r}")
             connection_key = (start_id, end_id, line_type)
@@ -425,8 +427,10 @@ class WorkflowViewIoMixin:
         self.update_card_sequence_display()
         self._refresh_thread_start_custom_names()
         self._sync_connections_with_scene()
+        self.reroute_connections()
 
-        if self.scene.items():
+        placing_start = bool(self.workflow_metadata.get("place_start_at_viewport"))
+        if self.scene.items() and not placing_start:
             items_rect = self.scene.itemsBoundingRect()
             self.scene.setSceneRect(
                 items_rect.adjusted(
@@ -468,7 +472,13 @@ class WorkflowViewIoMixin:
             ):
                 raise TypeError("工作流 view_center 必须是包含 2 个有限数字的列表")
             saved_center_point = QPointF(view_center_data[0], view_center_data[1])
-            QTimer.singleShot(100, lambda point=saved_center_point: self._deferred_center_view(point))
+            QTimer.singleShot(
+                100,
+                self,
+                lambda point=saved_center_point: self._deferred_center_view(point),
+            )
+        elif placing_start:
+            QTimer.singleShot(100, self, self._place_start_card_at_viewport_top_left)
 
         logger.info("[工作流加载] 完成，卡片数量=%s，连线数量=%s", len(self.cards), len(self.connections))
 

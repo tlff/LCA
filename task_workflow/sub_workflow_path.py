@@ -39,6 +39,19 @@ def _existing_file(path_text: str) -> Optional[str]:
     return None
 
 
+def _session_for_parent(parent_workflow_file: object):
+    from app_core.lca_format.project_io import ensure_registered_lca_session, is_lca_path
+    from app_core.lca_format.session import get_active, get_for_path
+
+    parent_text = _clean_path_text(parent_workflow_file)
+    if parent_text and not parent_text.startswith("memory://"):
+        session = get_for_path(parent_text)
+        if session is None and is_lca_path(parent_text):
+            session = ensure_registered_lca_session(parent_text)
+        return session
+    return get_active()
+
+
 def resolve_sub_workflow_path(
     raw_path: object,
     parent_workflow_file: object = None,
@@ -57,25 +70,18 @@ def resolve_sub_workflow_path(
             return "memory://" + relative
         return "memory://workflows/" + relative
 
-    try:
-        from app_core.lca_format.session import get_active
-
-        session = get_active()
-        logical_path = path_text.replace("\\", "/").lstrip("/")
-        if session is not None and session.get_bytes(logical_path) is not None:
-            return "memory://" + logical_path
-    except Exception:
-        pass
+    session = _session_for_parent(parent_workflow_file)
+    logical_path = path_text.replace("\\", "/").lstrip("/")
+    if session is not None and session.get_bytes(logical_path) is not None:
+        return "memory://" + logical_path
 
     existing = _existing_file(path_text)
     if existing:
         return existing
 
+    if os.path.isabs(path_text):
+        return None
     base_dir = get_workflow_base_dir(parent_workflow_file)
     if not base_dir:
         return None
-    if os.path.isabs(path_text):
-        # Workflows are portable between machines. If a historical absolute
-        # path no longer exists, recover by its basename beside the parent.
-        return _existing_file(os.path.join(base_dir, os.path.basename(path_text)))
     return _existing_file(os.path.join(base_dir, path_text))

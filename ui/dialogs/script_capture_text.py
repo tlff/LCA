@@ -3,9 +3,10 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any, Dict, Optional, Sequence, Tuple
 
-from tasks.script_task import command_name_from_snippet, plan_snippet_insert
+from tasks.script_task import command_name_from_snippet, plan_snippet_insert, source_lines
 from utils.app_paths import normalize_workflow_image_path
 
 CAPTURE_SNIPPETS = {
@@ -14,7 +15,7 @@ CAPTURE_SNIPPETS = {
     "coord": "点击",
     "element": "点元素",
     "offset": "点击",
-    "region": "找图",
+    "region": "区域.设置",
 }
 
 _HOSTS = {
@@ -23,8 +24,32 @@ _HOSTS = {
     "coord": ("点击", "移动", "拖拽", "滚轮"),
     "element": ("点元素",),
     "offset": ("点击", "找图", "点文字", "找色", "检测"),
-    "region": ("找图", "找字", "找字库", "找色", "检测", "点文字", "点字库", "等图", "等文字", "等字库"),
+    "region": (
+        "区域.设置",
+        "持续检测",
+        "等检测消失",
+        "等检测",
+        "持续找图",
+        "找所有图",
+        "等图消失",
+        "等文字消失",
+        "等字库消失",
+        "等色消失",
+        "找字库",
+        "点字库",
+        "等字库",
+        "点文字",
+        "等文字",
+        "等图",
+        "等色",
+        "找图",
+        "找字",
+        "找色",
+        "检测",
+    ),
 }
+
+_REGION_AUTO_NAME_RE = re.compile(r'区域\.设置\s*\(\s*(["\'])区域(\d+)\1')
 
 
 def script_string_literal(value: Any) -> str:
@@ -33,7 +58,12 @@ def script_string_literal(value: Any) -> str:
 
 
 def script_image_literal(path: Any) -> str:
-    return normalize_workflow_image_path(str(path or "").strip())
+    from task_workflow.resource_context import current_images_dir
+
+    return normalize_workflow_image_path(
+        str(path or "").strip(),
+        images_dir=current_images_dir(),
+    )
 
 
 def build_capture_snippet(kind: str, value: Any) -> str:
@@ -51,14 +81,16 @@ def build_capture_snippet(kind: str, value: Any) -> str:
         return f"点击(目标, 偏移x={dx}, 偏移y={dy})"
     if kind == "region":
         left, top, width, height = _as_region(value)
-        return f"找图(图片, 区域=({left}, {top}, {width}, {height}))"
+        return f'区域.设置("区域1", {left}, {top}, {width}, {height})'
     raise ValueError(f"未知采集类型: {kind}")
 
 
 def apply_script_capture(source: str, line_index: int, kind: str, value: Any) -> Dict[str, Any]:
     """按当前行改参数；对不上命令就按插入规则写下一条。"""
-    lines = str(source or "").splitlines() or [""]
+    lines = source_lines(source)
     safe_index = max(0, min(int(line_index), len(lines) - 1))
+    if kind == "region":
+        return _apply_region_capture(source, lines, safe_index, value)
     updated = rewrite_capture_line(lines[safe_index], kind, value)
     if updated is not None:
         return {"mode": "replace", "line": safe_index, "text": updated}
@@ -67,8 +99,6 @@ def apply_script_capture(source: str, line_index: int, kind: str, value: Any) ->
         snippet = _coord_snippet_for_line(lines[safe_index], value)
     elif kind == "offset":
         snippet = _offset_snippet_for_line(lines[safe_index], value)
-    elif kind == "region":
-        snippet = _region_snippet_for_line(lines[safe_index], value)
     return plan_snippet_insert(snippet, source, safe_index)
 
 
@@ -97,6 +127,8 @@ def _rewrite_call_args(name: str, inside: str, kind: str, value: Any) -> str:
         return _set_offset_kwargs(inside, int(dx), int(dy))
     if kind == "region":
         left, top, width, height = _as_region(value)
+        if name == "区域.设置":
+            return _rewrite_region_set_args(inside, left, top, width, height)
         return _set_kwargs(inside, 区域=f"({left}, {top}, {width}, {height})")
     x, y = _as_xy(value)
     if name == "滚轮":
@@ -171,22 +203,71 @@ def _offset_snippet_for_line(line: str, value: Any) -> str:
     return f"点击(目标, 偏移x={dx}, 偏移y={dy})"
 
 
-def _region_snippet_for_line(line: str, value: Any) -> str:
+def _region_snippet_for_line(value: Any, source: str = "") -> str:
     left, top, width, height = _as_region(value)
-    region = f"区域=({left}, {top}, {width}, {height})"
-    found = _find_host_call(str(line or ""), _HOSTS["region"])
-    name = found[0] if found else command_name_from_snippet(str(line or "").strip())
-    if name == "找图":
-        return f"找图(图片, {region})"
-    if name == "点文字":
-        return f"点文字(目标, {region})"
-    if name == "找色":
-        return f"找色(颜色, {region})"
-    if name == "检测":
-        return f"检测({region})"
-    if name in _HOSTS["region"]:
-        return f"{name}({region})"
-    return f"找图(图片, {region})"
+    return f'区域.设置("{_next_auto_region_name(source)}", {left}, {top}, {width}, {height})'
+
+
+def _apply_region_capture(source: str, lines: Sequence[str], line_index: int, value: Any) -> Dict[str, Any]:
+    current = lines[line_index]
+    if _find_host_call(current, ("区域.设置",)) is not None:
+        updated = rewrite_capture_line(current, "region", value)
+        if updated is not None:
+            return {"mode": "replace", "line": line_index, "text": updated}
+    found = _find_host_call(current, _HOSTS["region"])
+    if found is not None:
+        _name, open_index, close_index = found
+        region_name = _named_region_arg(current[open_index + 1 : close_index])
+        if region_name:
+            set_index = _find_region_set_line(lines, region_name)
+            if set_index is not None:
+                updated = rewrite_capture_line(lines[set_index], "region", value)
+                if updated is not None:
+                    return {"mode": "replace", "line": set_index, "text": updated}
+        updated = rewrite_capture_line(current, "region", value)
+        if updated is not None:
+            return {"mode": "replace", "line": line_index, "text": updated}
+    snippet = _region_snippet_for_line(value, source)
+    return plan_snippet_insert(snippet, source, line_index)
+
+
+def _next_auto_region_name(source: str) -> str:
+    used = {int(match.group(2)) for match in _REGION_AUTO_NAME_RE.finditer(str(source or ""))}
+    index = 1
+    while index in used:
+        index += 1
+    return f"区域{index}"
+
+
+def _named_region_arg(inside: str) -> Optional[str]:
+    for arg in _split_top_level(inside):
+        if not arg.startswith("区域="):
+            continue
+        raw = arg[len("区域=") :].strip()
+        if len(raw) >= 2 and raw[0] in {'"', "'"} and raw[-1] == raw[0]:
+            return raw[1:-1]
+    return None
+
+
+def _find_region_set_line(lines: Sequence[str], name: str) -> Optional[int]:
+    for index, line in enumerate(lines):
+        found = _find_host_call(line, ("区域.设置",))
+        if found is None:
+            continue
+        _call, open_index, close_index = found
+        args = _split_top_level(line[open_index + 1 : close_index])
+        if not args:
+            continue
+        raw = args[0].strip()
+        if len(raw) >= 2 and raw[0] in {'"', "'"} and raw[-1] == raw[0] and raw[1:-1] == name:
+            return index
+    return None
+
+
+def _rewrite_region_set_args(inside: str, left: int, top: int, width: int, height: int) -> str:
+    args = _split_top_level(inside)
+    name = args[0] if args else '"区域1"'
+    return f"{name}, {left}, {top}, {width}, {height}"
 
 
 def peek_find_image_path(line: str) -> Optional[str]:

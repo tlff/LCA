@@ -312,13 +312,16 @@ class ParameterPanelRecordingMixin:
                     return
             except Exception:
                 pass
-            if not self._is_recording_panel_active:
-                return
             parent = getattr(self, "parent_window", None)
             if parent is not None and hasattr(parent, "is_hotkey_listen_enabled") and not parent.is_hotkey_listen_enabled():
                 return
 
-            # 触发回放操作
+            if getattr(self, "_replay_active", False):
+                logger.info("快捷键触发:停止回放")
+                self._stop_replay()
+                return
+            if not self._is_recording_panel_active:
+                return
             logger.info("快捷键触发:开始回放")
             self._start_replay()
 
@@ -432,10 +435,25 @@ class ParameterPanelRecordingMixin:
         logger.info('用户请求停止回放')
         thread = getattr(self, '_replay_thread', None)
         if not thread or not thread.isRunning():
-            return
+            return False
         thread.stop()
         logger.info('已发送回放停止信号')
         self._set_replay_button_stopping_state()
+        return True
+
+    def stop_test_replay(self) -> bool:
+        """停止测试回放（参数面板或步骤编辑器）。"""
+        stopped = False
+        thread = getattr(self, "_replay_thread", None)
+        if thread is not None and thread.isRunning():
+            self._stop_replay()
+            stopped = True
+        editor = getattr(self, "_action_editor", None)
+        stop_editor = getattr(editor, "_stop_active_replay_thread", None)
+        if callable(stop_editor):
+            stop_editor()
+            stopped = True
+        return stopped
 
     def _set_replay_button_running_state(self):
         replay_widget = self.widgets.get('replay_control')
@@ -897,8 +915,11 @@ class ParameterPanelRecordingMixin:
 
                 editor.actions_updated.connect(on_actions_updated)
 
-                # 显示对话框
-                result = editor.exec()
+                self._action_editor = editor
+                try:
+                    result = editor.exec()
+                finally:
+                    self._action_editor = None
 
                 if result == editor.DialogCode.Accepted:
                     logger.info("步骤编辑已保存")

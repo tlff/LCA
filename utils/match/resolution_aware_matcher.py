@@ -16,7 +16,9 @@ logger = logging.getLogger(__name__)
 def smart_match_template(haystack: np.ndarray,
                          needle: np.ndarray,
                          confidence: float = 0.8,
-                         roi: Optional[Tuple[int, int, int, int]] = None) -> Dict[str, Any]:
+                         roi: Optional[Tuple[int, int, int, int]] = None,
+                         mode: str = "彩色",
+                         rotation=0) -> Dict[str, Any]:
     """
     简单模板匹配
 
@@ -38,7 +40,7 @@ def smart_match_template(haystack: np.ndarray,
 
     template_h, template_w = needle.shape[:2]
 
-    result = match_template(haystack, needle, confidence, roi)
+    result = match_template(haystack, needle, confidence, roi, mode=mode, rotation=rotation)
 
     if result.found:
         x, y, w, h = result.location

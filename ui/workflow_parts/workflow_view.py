@@ -114,7 +114,7 @@ class WorkflowView(
         self.is_dragging_line = False
         self.drag_start_card: Optional[TaskCard] = None
         self.drag_start_port_type: Optional[str] = None
-        self.temp_line: Optional[QGraphicsLineItem] = None
+        self.temp_line: Optional[QGraphicsPathItem] = None
         self.temp_line_pen = QPen(Qt.GlobalColor.black, 1.0, Qt.PenStyle.DashLine) # Dashed line for temp
         self.temp_line_pen.setCapStyle(Qt.PenCapStyle.FlatCap)
         self.temp_line_pen.setJoinStyle(Qt.PenJoinStyle.MiterJoin)
@@ -164,6 +164,7 @@ class WorkflowView(
         self._deleting_card = False  # 标志：正在删除卡片，防止连线删除触发额外撤销
         self._deleting_cards = set()  # BUG FIX: 使用集合存储正在删除的卡片ID，防止重复删除
         self._loading_workflow = False  # 标志：正在加载工作流，防止连线删除触发撤销保存
+        self._rerouting_connections = False
         self._updating_sequence = False  # 标志：正在更新序列显示，防止连线重建触发撤销保存
         self._undoing_operation = False  # 标志：正在执行撤销操作，防止撤销过程中的操作触发新的撤销保存
         

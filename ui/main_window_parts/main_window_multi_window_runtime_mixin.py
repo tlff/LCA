@@ -2,8 +2,6 @@ import logging
 
 from PySide6.QtWidgets import QMessageBox
 
-from utils.window.window_coordinate_common import center_window_on_widget_screen
-
 from task_workflow.thread_start import THREAD_START_TASK_TYPE, is_thread_start_task_type
 
 logger = logging.getLogger(__name__)
@@ -68,9 +66,13 @@ class MainWindowMultiWindowRuntimeMixin:
         if 'task_modules' not in workflow_data or not workflow_data['task_modules']:
             workflow_data['task_modules'] = self.task_modules
             logger.info("多窗口执行: 添加task_modules到workflow_data")
-        if 'images_dir' not in workflow_data or not workflow_data['images_dir']:
-            workflow_data['images_dir'] = self.images_dir
-            logger.info(f"多窗口执行: 添加images_dir到workflow_data: {self.images_dir}")
+        task_images_dir = getattr(runtime_task, "images_dir", None) if runtime_task is not None else None
+        task_sounds_dir = getattr(runtime_task, "sounds_dir", None) if runtime_task is not None else None
+        if not workflow_data.get('images_dir'):
+            workflow_data['images_dir'] = task_images_dir or self.images_dir
+            logger.info(f"多窗口执行: 添加images_dir到workflow_data: {workflow_data['images_dir']}")
+        if not workflow_data.get('sounds_dir'):
+            workflow_data['sounds_dir'] = task_sounds_dir
         # 验证关键配置
         if not workflow_data.get('task_modules'):
             logger.error("多窗口执行: task_modules为空，无法执行")
@@ -134,275 +136,79 @@ class MainWindowMultiWindowRuntimeMixin:
             logger.warning("前台执行被虚拟桌面策略取消")
             QMessageBox.warning(self, "无法执行", block_message)
             return
-        # 工具 关键修复：先清理旧的多窗口执行器
         if hasattr(self, 'multi_executor') and self.multi_executor:
-            logger.info("清理旧的多窗口执行器...")
+            logger.info("清理旧的多窗口会话...")
             try:
-                # 断开旧的信号连接
                 self.multi_executor.execution_progress.disconnect()
                 self.multi_executor.execution_completed.disconnect()
-                if hasattr(self.multi_executor, 'card_executing'):
-                    self.multi_executor.card_executing.disconnect()
-                if hasattr(self.multi_executor, 'card_finished'):
-                    self.multi_executor.card_finished.disconnect()
-                if hasattr(self.multi_executor, 'error_occurred'):
-                    self.multi_executor.error_occurred.disconnect()
-                # 清理执行器资源
+                self.multi_executor.card_executing.disconnect()
+                self.multi_executor.card_finished.disconnect()
+                self.multi_executor.error_occurred.disconnect()
+                self.multi_executor.show_warning.disconnect()
                 if hasattr(self.multi_executor, 'cleanup'):
                     self.multi_executor.cleanup()
-                logger.info("旧的多窗口执行器已清理")
+                logger.info("旧的多窗口会话已清理")
             except Exception as e:
-                logger.warning(f"清理旧执行器时出错: {e}")
-        # 创建统一多窗口执行器
+                logger.warning(f"清理旧会话时出错: {e}")
         try:
-            from task_workflow.multi_window_executor import UnifiedMultiWindowExecutor
-            logger.info("创建新的多窗口执行器...")
-            self.multi_executor = UnifiedMultiWindowExecutor(self)
-            # 工具 关键修复：添加所有窗口（包括禁用的），正确传递enabled状态
-            successfully_added = 0
-            failed_windows = []
-            # 遍历所有绑定的窗口，而不仅仅是启用的窗口
-            logger.info(f"检查绑定窗口状态，总数: {len(self.bound_windows)}")
-            for i, window_info in enumerate(self.bound_windows):
-                window_title = window_info['title']
-                window_enabled = window_info.get('enabled', True)
-                logger.info(f"  窗口{i+1}: {window_title}, enabled={window_enabled}, hwnd={window_info.get('hwnd')}")
-                # 优先使用绑定窗口中保存的句柄
-                hwnd = window_info.get('hwnd')
+            from ui.window_session.session_controller import WindowSessionController
+
+            for window_info in enabled_windows:
+                hwnd = window_info.get("hwnd")
                 if hwnd:
-                    # 验证句柄是否仍然有效
                     try:
-                        import win32gui
-                        if win32gui.IsWindow(hwnd):
-                            logger.info(f"使用保存的窗口句柄: {window_title} (HWND: {hwnd}), 启用: {window_enabled}")
-                            # 工具 强制重新检测DPI信息，不使用保存的旧信息
-                            self._force_refresh_dpi_info(window_info, hwnd)
-                        else:
-                            logger.warning(f"保存的句柄无效，重新查找: {window_title} (HWND: {hwnd})")
-                            hwnd = None
+                        self._force_refresh_dpi_info(window_info, hwnd)
                     except Exception:
-                        logger.warning(f"无法验证句柄，重新查找: {window_title}")
-                        hwnd = None
-                # 工具 关键修复：多窗口模式下不重新查找窗口，避免窗口混乱
-                if not hwnd:
-                    logger.error(f"多窗口模式下窗口句柄无效且无法恢复: {window_title}")
-                    logger.error("   建议：重新绑定该窗口以获取正确的句柄")
-                    failed_windows.append(window_title)
-                    continue
-                if hwnd:
-                    # 工具 关键修复：传递正确的enabled状态
-                    self.multi_executor.add_window(window_title, hwnd, window_enabled)
-                    if window_enabled:
-                        successfully_added += 1
-                    logger.info(f"添加窗口到多窗口执行器: {window_title} (HWND: {hwnd}), 启用: {window_enabled}")
-                else:
-                    failed_windows.append(window_title)
-                    logger.warning(f"未找到窗口: {window_title}")
-            # 检查是否有成功添加的窗口
-            if successfully_added == 0:
-                error_msg = "无法找到任何绑定的窗口！\n\n"
-                error_msg += "状态统计:\n"
-                error_msg += f"   启用的窗口数量: {len(enabled_windows)}\n"
-                error_msg += "   成功找到: 0 个\n"
-                error_msg += f"   未找到: {len(failed_windows)} 个\n\n"
-                error_msg += "未找到的窗口:\n"
-                for i, window in enumerate(failed_windows, 1):
-                    error_msg += f"   {i}. {window}\n"
-                error_msg += "\n灯泡 建议解决方案:\n"
-                error_msg += "   1. 检查目标窗口是否已打开\n"
-                error_msg += "   2. 在全局设置中重新绑定窗口\n"
-                error_msg += "   3. 确认窗口标题是否正确\n"
-                error_msg += "   4. 尝试使用'添加模拟器'功能重新添加"
-                # 创建自定义消息框，包含打开设置的按钮
-                msg_box = QMessageBox(self)
-                msg_box.setWindowTitle("多窗口执行失败")
-                msg_box.setText(error_msg)
-                msg_box.setIcon(QMessageBox.Icon.Warning)
-                # 添加按钮
-                settings_button = msg_box.addButton("打开全局设置", QMessageBox.ButtonRole.ActionRole)
-                close_button = msg_box.addButton("关闭", QMessageBox.ButtonRole.RejectRole)
-                center_window_on_widget_screen(msg_box, self)
-                msg_box.exec()
-                # 如果用户点击了设置按钮，打开全局设置
-                if msg_box.clickedButton() == settings_button:
-                    self.open_global_settings()
-                return
-            # 如果部分窗口未找到，给出警告
-            if failed_windows:
-                warning_msg = "部分窗口未找到，是否继续执行？\n\n"
-                warning_msg += "执行状态:\n"
-                warning_msg += f"可执行窗口: {successfully_added} 个\n"
-                warning_msg += f"未找到窗口: {len(failed_windows)} 个\n\n"
-                warning_msg += "未找到的窗口:\n"
-                for i, window in enumerate(failed_windows, 1):
-                    warning_msg += f"   {i}. {window}\n"
-                warning_msg += f"\n将仅在 {successfully_added} 个可用窗口中执行任务。\n"
-                warning_msg += "是否继续执行？"
-                reply = QMessageBox.question(
-                    self, "部分窗口未找到", warning_msg,
-                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
-                )
-                if reply != QMessageBox.StandardButton.Yes:
-                    return
-            # 连接信号
-            logger.info("连接多窗口执行器信号...")
+                        pass
+
+            logger.info("创建窗口会话控制器...")
+            self.multi_executor = WindowSessionController(self)
             self.multi_executor.execution_progress.connect(self._on_multi_window_progress)
             self.multi_executor.execution_completed.connect(self._on_multi_window_completed)
-            logger.info("已连接多窗口执行器的主要信号 (progress, completed)")
-            # 工具 连接卡片状态信号以支持闪烁效果
-            if hasattr(self.multi_executor, 'card_executing'):
-                self.multi_executor.card_executing.connect(self._handle_card_executing)
-                self.multi_executor.card_finished.connect(self._handle_card_finished)
-                self.multi_executor.error_occurred.connect(self._on_multi_window_error)
-                if hasattr(self.multi_executor, 'show_warning'):
-                    self.multi_executor.show_warning.connect(self._show_warning_dialog)
-                logger.info("已连接多窗口执行器的卡片状态信号")
-            else:
-                logger.warning("多窗口执行器没有卡片状态信号")
-            # 开始执行
-            delay_ms = self.multi_window_delay
-            # 全局执行模式与多窗口并发策略解耦：
-            # - execution_mode: 传给窗口执行器（foreground/background）
-            # - sync_execution_mode: 传给多窗口调度器（parallel/sequential）
-            from task_workflow.multi_window_executor import ExecutionMode
+            self.multi_executor.card_executing.connect(self._handle_card_executing)
+            self.multi_executor.card_finished.connect(self._handle_card_finished)
+            self.multi_executor.error_occurred.connect(self._on_multi_window_error)
+            self.multi_executor.show_warning.connect(self._show_warning_dialog)
             runtime_execution_mode = (
                 self.current_execution_mode if hasattr(self, 'current_execution_mode') else 'background_sendmessage'
             )
-            sync_execution_mode = ExecutionMode.PARALLEL
             workflow_payload = dict(workflow_data) if isinstance(workflow_data, dict) else {}
             workflow_payload['execution_mode'] = runtime_execution_mode
+            workflow_filepath = None
             if runtime_task is not None and len(enabled_tasks) <= 1:
-                workflow_payload['_workflow_filepath'] = getattr(runtime_task, 'filepath', None)
+                workflow_filepath = getattr(runtime_task, 'filepath', None)
+                workflow_payload['_workflow_filepath'] = workflow_filepath
+            try:
+                delay_ms = int(self.multi_window_delay or 0)
+            except (TypeError, ValueError):
+                delay_ms = 0
+            runtime_config = self.config if isinstance(getattr(self, "config", None), dict) else None
             logger.info(
-                f"多窗口执行配置: 执行模式={runtime_execution_mode}, 同步模式={sync_execution_mode.value}, "
-                f"延迟={delay_ms}ms, 窗口数={successfully_added}"
+                f"多窗口执行配置: 执行模式={runtime_execution_mode}, 延迟={delay_ms}ms, 窗口数={len(enabled_windows)}"
             )
-            # 工具 异步执行优化：优先使用异步执行，回退到同步执行
-            execution_success = False
-            # 检查是否支持异步执行
-            if hasattr(self.multi_executor, '_async_mode'):
-                logger.info(f"异步模式状态: {self.multi_executor._async_mode}")
-            if hasattr(self.multi_executor, '_async_mode') and self.multi_executor._async_mode:
-                logger.info("使用异步执行模式启动多窗口任务")
-                try:
-                    # 使用 QTimer 来在事件循环中执行异步任务
-                    import asyncio
-                    from PySide6.QtCore import QTimer
-                    # 创建异步执行任务
-                    async def async_execution():
-                        return await self.multi_executor.start_execution_async(
-                            workflow_payload, delay_ms, sync_execution_mode, self.bound_windows
-                        )
-                    # 在Qt事件循环中执行异步任务
-                    if hasattr(asyncio, 'get_event_loop'):
-                        try:
-                            loop = asyncio.get_event_loop()
-                            if loop.is_running():
-                                # 如果事件循环正在运行，创建任务
-                                task = asyncio.create_task(async_execution())
-                                # 使用QTimer来检查任务完成状态
-                                self._async_execution_task = task
-                                self._cleanup_async_execution_watchdog_timers()
-                                self._check_async_execution_timer = QTimer(self)
-                                self._check_async_execution_timer.setObjectName("__async_execution_watchdog__")
-                                self._check_async_execution_timer.timeout.connect(self._check_async_execution_status)
-                                self._check_async_execution_timer.start(100)  # 每100ms检查一次
-                                execution_success = True
-                                logger.info("异步执行任务已创建")
-                            else:
-                                # 关键修复：不使用run_until_complete，改用QTimer异步执行
-                                logger.warning("事件循环未运行，改用QTimer异步执行避免干扰Qt事件循环")
-                                task = asyncio.create_task(async_execution())
-                                self._async_execution_task = task
-                                self._cleanup_async_execution_watchdog_timers()
-                                self._check_async_execution_timer = QTimer(self)
-                                self._check_async_execution_timer.setObjectName("__async_execution_watchdog__")
-                                self._check_async_execution_timer.timeout.connect(self._check_async_execution_status)
-                                self._check_async_execution_timer.start(100)  # 每100ms检查一次
-                                execution_success = True
-                                logger.warning("已创建异步任务和检查定时器")
-                                # 立即启动异步任务检查
-                                self._check_async_execution_status()
-                        except Exception as e:
-                            logger.warning(f"异步执行失败，回退到同步模式: {e}")
-                            execution_success = False
-                    else:
-                        logger.warning("asyncio不可用，回退到同步模式")
-                        execution_success = False
-                except Exception as e:
-                    logger.warning(f"异步执行初始化失败，回退到同步模式: {e}")
-                    execution_success = False
-            # 如果异步执行失败或不可用，使用同步执行
-            if not execution_success:
-                logger.warning("异步执行失败，回退到同步执行模式启动多窗口任务")
-                execution_success = self.multi_executor.start_execution(
-                    workflow_payload, delay_ms, sync_execution_mode, self.bound_windows
-                )
-            if execution_success:
-                logger.info(f"多窗口执行已启动，共 {successfully_added} 个窗口，延迟 {delay_ms}ms")
+            started = self.multi_executor.start_execution(
+                workflow_data=workflow_payload,
+                bound_windows=list(self.bound_windows or []),
+                task_modules=workflow_payload.get("task_modules") or self.task_modules,
+                delay_ms=delay_ms,
+                execution_mode=runtime_execution_mode,
+                workflow_filepath=workflow_filepath,
+                runtime_config=runtime_config,
+            )
+            if started:
+                logger.info("多窗口会话已启动")
                 self._runtime_pause_owner = 'multi_executor'
                 self._runtime_stop_owner = 'multi_executor'
-                # 正确设置执行状态和停止按钮
                 self._setup_multi_window_stop_button()
-                # 工具 删除弹窗：直接在日志中记录启动信息，不显示弹窗
-                # QMessageBox.information(self, "执行开始", f"已在 {successfully_added} 个窗口开始执行任务")
             else:
-                logger.error("多窗口执行启动失败")
-                QMessageBox.warning(self, "执行失败", "多窗口执行启动失败，请检查窗口状态")
+                logger.error("多窗口执行启动失败：没有可确认的目标窗口")
+                QMessageBox.warning(
+                    self,
+                    "多窗口执行失败",
+                    "无法确认任何绑定窗口。\n\n请检查目标窗口是否已打开，并在全局设置中重新绑定窗口。",
+                )
                 self._reset_run_button()
-        except ImportError:
-            logger.error("无法导入多窗口执行器")
-            QMessageBox.critical(self, "功能不可用", "多窗口执行功能不可用，请检查相关模块")
         except Exception as e:
             logger.error(f"多窗口执行启动失败: {e}")
             QMessageBox.critical(self, "执行失败", f"多窗口执行启动失败:\n{e}")
             self._reset_run_button()
-
-    def _cleanup_async_execution_watchdog_timers(self):
-        """停止并回收所有异步执行状态检查定时器（含历史遗留对象）。"""
-        from PySide6.QtCore import QTimer
-        for timer in self.findChildren(QTimer, "__async_execution_watchdog__"):
-            if timer is None:
-                continue
-            try:
-                if timer.isActive():
-                    timer.stop()
-            except RuntimeError:
-                continue
-            try:
-                timer.deleteLater()
-            except RuntimeError:
-                continue
-        if hasattr(self, '_check_async_execution_timer'):
-            try:
-                delattr(self, '_check_async_execution_timer')
-            except Exception:
-                pass
-    def _check_async_execution_status(self):
-        """检查异步执行状态"""
-        task = getattr(self, '_async_execution_task', None)
-        if task is None:
-            # 若任务引用已不存在，主动清理全部看门狗定时器，避免历史对象持续触发
-            self._cleanup_async_execution_watchdog_timers()
-            return
-        if not task.done():
-            return
-        # 任务完成，统一清理看门狗定时器
-        self._cleanup_async_execution_watchdog_timers()
-        try:
-            result = task.result()
-            if result:
-                self._runtime_pause_owner = 'multi_executor'
-                self._runtime_stop_owner = 'multi_executor'
-                self._setup_multi_window_stop_button()
-            else:
-                logger.error("异步多窗口执行失败")
-                QMessageBox.warning(self, "执行失败", "异步多窗口执行失败，请检查窗口状态")
-                self._reset_run_button()
-        except Exception as e:
-            logger.error(f"异步多窗口执行异常: {e}")
-            QMessageBox.warning(self, "执行异常", f"异步多窗口执行异常:\n{e}")
-            self._reset_run_button()
-        finally:
-            if hasattr(self, '_async_execution_task'):
-                delattr(self, '_async_execution_task')

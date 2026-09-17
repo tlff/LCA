@@ -136,17 +136,6 @@ if not _IS_SUBPROCESS:
 
 from app_core.config_store import load_config, save_config
 
-# 旧版（程序目录内）用户数据只需要在主进程启动时检查一次；已迁移过则静默跳过
-if not _IS_SUBPROCESS:
-    try:
-        from app_core.user_data_migration import migrate_default_user_data
-
-        _migration = migrate_default_user_data()
-        if _migration.performed and _migration.copied:
-            logging.info("已迁移旧版用户数据: %s", ", ".join(_migration.copied))
-    except Exception as migration_error:
-        logging.warning("用户数据迁移失败，继续使用当前用户目录: %s", migration_error)
-
 config = load_config()
 
 # 子进程不需要加载 GUI 库

@@ -104,7 +104,7 @@ def schedule_bound_windows_plugin_bind_probe(
 ) -> bool:
     """切换到插件或修改插件参数后，对整份绑定列表重新试绑。
 
-    notify=True 时失败合并成一次弹窗；设置页里边改边试用 notify=False，只把结果回给 on_done(results)。
+    notify=True 时失败合并成一次弹窗；notify=False 只把结果回给 on_done(results)。
     should_stop() 为真时后台停止且不再打戳、不回调（取消对话框或参数又变了）。返回是否真的启动了试绑。
     """
     bridge = _bridge_for(widget, "_plugin_bind_batch_bridge")

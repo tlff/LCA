@@ -12,12 +12,37 @@ import os
 import logging
 from typing import Dict, Any, Optional, List, Tuple
 
-from tasks.task_utils import coerce_bool, capture_and_match_template_smart
+from tasks.task_utils import (
+    coerce_bool,
+    capture_and_match_template_smart,
+    correct_single_image_path,
+    get_image_path_resolver,
+)
 import cv2
+from task_workflow.resource_path import format_resource_text, unwrap_resource_path
 from utils.window.hwnd_utils import as_hwnd
 from utils.match.smart_image_matcher import normalize_match_image
 
 logger = logging.getLogger(__name__)
+
+
+def _bind_probe_resource_dirs(main_window=None, parameter_panel=None) -> str:
+    from task_workflow.resource_context import bind_resource_dirs, resource_dirs_from_mapping
+
+    dirs = {}
+    if main_window is not None and hasattr(main_window, "_current_task_resource_dirs"):
+        dirs = dict(main_window._current_task_resource_dirs() or {})
+    if parameter_panel is not None and not str(dirs.get("images_dir") or "").strip():
+        dirs = resource_dirs_from_mapping(parameter_panel)
+        if not str(dirs.get("images_dir") or "").strip():
+            dirs["images_dir"] = str(getattr(parameter_panel, "images_dir", "") or "")
+    images_dir = str(dirs.get("images_dir") or "").strip()
+    if images_dir or any(
+        str(dirs.get(key) or "").strip()
+        for key in ("sounds_dir", "dicts_dir", "yolo_dir", "replays_dir", "plugins_dir")
+    ):
+        bind_resource_dirs(dirs)
+    return images_dir
 
 
 def test_image_recognition(params: Dict[str, Any], target_hwnd: Optional[int] = None,
@@ -58,8 +83,9 @@ def test_image_recognition(params: Dict[str, Any], target_hwnd: Optional[int] = 
         # 窗口已在调用方（parameter_panel）隐藏，此处不再重复隐藏
 
         # 1. 获取参数
-        image_path = params.get('image_path', '')
-        image_paths_text = params.get('image_paths', '').strip()
+        images_dir = _bind_probe_resource_dirs(main_window, parameter_panel)
+        image_path = unwrap_resource_path(params.get('image_path')) or ""
+        image_paths_text = format_resource_text(params.get('image_paths'))
         confidence = params.get('confidence', 0.8)
         preprocessing_method = params.get('preprocessing_method', '无')
         multi_image_mode = params.get('multi_image_mode', '单图识别')
@@ -75,7 +101,11 @@ def test_image_recognition(params: Dict[str, Any], target_hwnd: Optional[int] = 
         else:
             image_path_for_test = image_path
             image_paths_text = ''
-        test_image_paths = _collect_image_paths(image_path_for_test, image_paths_text)
+        test_image_paths = _collect_image_paths(
+            image_path_for_test,
+            image_paths_text,
+            images_dir=images_dir,
+        )
 
         if not test_image_paths:
             logger.error("测试失败: 未指定目标图片路径或所有图片路径无效")
@@ -153,30 +183,34 @@ def test_image_recognition(params: Dict[str, Any], target_hwnd: Optional[int] = 
         restore_windows()
 
 
-def _collect_image_paths(image_path: str, image_paths_text: str) -> List[str]:
+def _collect_image_paths(image_path, image_paths_text, images_dir: str = "") -> List[str]:
     """收集所有待测试的图片路径"""
-    test_image_paths = []
     import re
-    resolver = None
+
+    image_path = unwrap_resource_path(image_path) or ""
+    image_paths_text = format_resource_text(image_paths_text)
+    test_image_paths = []
     try:
-        from tasks.task_utils import get_image_path_resolver
-        resolver = get_image_path_resolver()
-        resolver.clear_cache()
+        get_image_path_resolver().clear_cache()
     except Exception:
-        resolver = None
+        pass
 
-    # 单图模式
+    def _resolve_one(raw: str) -> Optional[str]:
+        text = str(raw or "").strip()
+        if not text:
+            return None
+        resolved = correct_single_image_path(text, images_dir=images_dir or None)
+        if resolved and os.path.isfile(resolved):
+            return resolved
+        if os.path.isfile(text):
+            return text
+        return None
+
     if image_path:
-        try:
-            resolved = resolver.resolve(image_path) if resolver else None
-        except Exception:
-            resolved = None
-        if resolved and os.path.exists(resolved):
+        resolved = _resolve_one(image_path)
+        if resolved:
             test_image_paths.append(resolved)
-        elif os.path.exists(image_path):
-            test_image_paths.append(image_path)
 
-    # 多图模式
     if image_paths_text:
         lines = re.split(r'[\n;]+', image_paths_text)
         common_dir = None
@@ -198,12 +232,8 @@ def _collect_image_paths(image_path: str, image_paths_text: str) -> List[str]:
             else:
                 full_path = line
 
-            try:
-                resolved = resolver.resolve(full_path) if resolver else None
-            except Exception:
-                resolved = None
-            candidate_path = resolved if resolved and os.path.exists(resolved) else full_path
-            if os.path.exists(candidate_path) and candidate_path not in test_image_paths:
+            candidate_path = _resolve_one(full_path)
+            if candidate_path and candidate_path not in test_image_paths:
                 test_image_paths.append(candidate_path)
 
     return test_image_paths

@@ -43,7 +43,6 @@ class ParameterPanelWidgetRegistryMixin:
             'motion_region_selector',
             'image_region_selector',
             'multi_image_region_selector',
-            'yolo_realtime_preview',
             'record_control',
             'replay_control',
             'action_editor',
@@ -73,7 +72,10 @@ class ParameterPanelWidgetRegistryMixin:
     def _normalize_single_image_parameter_value(self, name: Optional[str], value: Any) -> Any:
         if not self._is_single_image_parameter_name(name):
             return value
-        return normalize_workflow_image_path(value)
+        return normalize_workflow_image_path(
+            value,
+            images_dir=str(getattr(self, "images_dir", "") or ""),
+        )
 
     def _update_current_parameter_from_widget(self, target_widget: QWidget, value: Any) -> Optional[str]:
         name = self._get_registered_widget_name(target_widget)
@@ -87,6 +89,8 @@ class ParameterPanelWidgetRegistryMixin:
         logger.debug(f"清除参数面板内容 - card_id: {self.current_card_id}")
         self._stop_combo_key_sequence_recording()
         self._clear_favorites_runtime_refs()
+        if hasattr(self, "_clear_ai_runtime_refs"):
+            self._clear_ai_runtime_refs()
 
         # 【修复】先断开所有文件输入框的信号连接，防止图片预览混入其他任务
         for name, widget in list(self.value_widgets.items()):

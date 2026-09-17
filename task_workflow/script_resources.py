@@ -7,11 +7,124 @@ import os
 import shutil
 from typing import Any, Dict, List, Optional, Tuple
 
-from utils.app_paths import get_app_root, get_images_dir, get_sounds_dir, normalize_workflow_image_path
+from utils.app_paths import (
+    get_app_root,
+    get_images_dir,
+    get_plugin_dir,
+    get_sounds_dir,
+    get_user_data_dir,
+    normalize_workflow_image_path,
+)
+
+
+def _current_dirs(
+    images_dir: str = "",
+    sounds_dir: str = "",
+    dicts_dir: str = "",
+    yolo_dir: str = "",
+    replays_dir: str = "",
+    plugins_dir: str = "",
+) -> Dict[str, str]:
+    from task_workflow.resource_context import current_resource_dirs
+
+    current = current_resource_dirs()
+    return {
+        "images_dir": str(images_dir or "").strip() or current["images_dir"],
+        "sounds_dir": str(sounds_dir or "").strip() or current["sounds_dir"],
+        "dicts_dir": str(dicts_dir or "").strip() or current["dicts_dir"],
+        "yolo_dir": str(yolo_dir or "").strip() or current["yolo_dir"],
+        "replays_dir": str(replays_dir or "").strip() or current["replays_dir"],
+        "plugins_dir": str(plugins_dir or "").strip() or current["plugins_dir"],
+    }
+
+
+def _kind_suffix(path: str, folder: str) -> str:
+    text = str(path or "").replace("\\", "/").strip()
+    lowered = text.lower()
+    packaged = {
+        "images": ("assets/images/",),
+        "sounds": ("assets/sounds/",),
+        "dicts": ("assets/images/dicts/", "assets/dicts/"),
+        "yolo": ("assets/yolo/", "assets/models/"),
+        "replays": ("assets/replays/",),
+        "plugins": ("assets/components/",),
+    }
+    for prefix in packaged.get(folder, ()):
+        if lowered.startswith(prefix):
+            return text[len(prefix):]
+    prefix = f"{folder}/"
+    if lowered.startswith(prefix):
+        return text[len(prefix):]
+    return os.path.basename(text)
 
 IMAGE_EXTS = {".bmp", ".png", ".jpg", ".jpeg", ".webp"}
 MODEL_EXTS = {".onnx"}
 AUDIO_EXTS = {".wav", ".mp3", ".wma", ".m4a", ".ogg", ".flac"}
+COMPONENT_EXTS = {".dll", ".exe", ".py"}
+_MODULE_OFFSET_EXTS = {".exe", ".dll", ".sys"}
+_PLUGIN_MODULE_PREFIXES = ("plugins/", "assets/components/")
+
+
+def _is_module_offset_literal(path: str) -> bool:
+    """大漠「模块名+偏移」地址不是磁盘上的组件文件。"""
+    text = str(path or "").replace("\\", "/").strip()
+    plus = text.find("+")
+    if plus <= 0:
+        return False
+    module = text[:plus]
+    while module.startswith("["):
+        module = module[1:]
+    base = module.rsplit("/", 1)[-1]
+    return os.path.splitext(base)[1].lower() in _MODULE_OFFSET_EXTS
+
+
+def strip_plugin_module_prefix(value: str) -> str:
+    """去掉地址或汇编指令里模块名前面的 plugins/ 路径。"""
+    text = str(value or "").replace("\\", "/").strip()
+    lowered = text.lower()
+    out = []
+    index = 0
+    length = len(text)
+    while index < length:
+        skipped = False
+        for prefix in _PLUGIN_MODULE_PREFIXES:
+            if lowered.startswith(prefix, index):
+                after = text[index + len(prefix):]
+                name = after.split("+", 1)[0].split("/", 1)[0].split("]", 1)[0]
+                if os.path.splitext(name)[1].lower() in _MODULE_OFFSET_EXTS:
+                    index += len(prefix)
+                    skipped = True
+                    break
+        if skipped:
+            continue
+        out.append(text[index])
+        index += 1
+    return "".join(out)
+
+
+def enclosing_call_name(source: str, pos: int) -> str:
+    """字面量所在调用的命令名，例如 大漠内存.读取文本。"""
+    text = str(source or "")
+    depth = 0
+    index = int(pos) - 1
+    while index >= 0:
+        char = text[index]
+        if char == ")":
+            depth += 1
+        elif char == "(":
+            if depth == 0:
+                end = index
+                start = index - 1
+                while start >= 0:
+                    current = text[start]
+                    if current.isalnum() or current in "._" or "\u4e00" <= current <= "\u9fff":
+                        start -= 1
+                        continue
+                    break
+                return text[start + 1 : end]
+            depth -= 1
+        index -= 1
+    return ""
 
 
 def extract_string_literals(source: str) -> List[Tuple[str, int, int]]:
@@ -49,15 +162,21 @@ def resource_kind(path: str) -> str:
     text = str(path or "").replace("\\", "/").strip()
     if not text:
         return ""
+    if _is_module_offset_literal(text):
+        return ""
     lowered = text.lower()
-    if lowered.endswith(".replay.json") or lowered.startswith("replays/"):
+    if lowered.endswith(".replay.json") or lowered.startswith(("replays/", "assets/replays/")):
         return "replay"
     ext = os.path.splitext(text)[1].lower()
-    if ext in MODEL_EXTS or lowered.startswith("yolo/"):
+    if lowered.startswith(("dicts/", "assets/images/dicts/", "assets/dicts/")):
+        return "dict"
+    if ext in MODEL_EXTS or lowered.startswith(("yolo/", "assets/yolo/", "assets/models/")):
         return "model"
-    if ext in AUDIO_EXTS or lowered.startswith("sounds/"):
+    if ext in AUDIO_EXTS or lowered.startswith(("sounds/", "assets/sounds/")):
         return "audio"
-    if ext in IMAGE_EXTS or lowered.startswith("images/"):
+    if ext in COMPONENT_EXTS or lowered.startswith(("plugins/", "assets/components/")):
+        return "component"
+    if ext in IMAGE_EXTS or lowered.startswith(("images/", "assets/images/")):
         return "image"
     return ""
 
@@ -73,17 +192,33 @@ def card_filename_prefixes(card_id: Optional[int], workflow_token: str = "") -> 
     return prefixes
 
 
-def script_resource_roots(images_dir: str = "", sounds_dir: str = "") -> List[str]:
+def script_resource_roots(
+    images_dir: str = "",
+    sounds_dir: str = "",
+    dicts_dir: str = "",
+    yolo_dir: str = "",
+    replays_dir: str = "",
+    plugins_dir: str = "",
+) -> List[str]:
+    dirs = _current_dirs(images_dir, sounds_dir, dicts_dir, yolo_dir, replays_dir, plugins_dir)
+    app_root = get_app_root()
     roots = []
     for raw in (
-        images_dir,
-        sounds_dir,
+        dirs["images_dir"],
+        dirs["sounds_dir"],
+        dirs["dicts_dir"],
+        dirs["yolo_dir"],
+        dirs["replays_dir"],
+        dirs["plugins_dir"],
         get_images_dir("LCA"),
         get_sounds_dir("LCA"),
-        os.path.join(get_app_root(), "yolo"),
-        os.path.join(get_app_root(), "replays"),
-        os.path.join(get_app_root(), "images"),
-        os.path.join(get_app_root(), "sounds"),
+        os.path.join(app_root, "yolo"),
+        os.path.join(app_root, "replays"),
+        os.path.join(app_root, "images"),
+        os.path.join(app_root, "sounds"),
+        get_plugin_dir(),
+        os.path.join(get_user_data_dir("LCA"), "components"),
+        os.path.join(app_root, "dicts"),
     ):
         text = str(raw or "").strip()
         if not text:
@@ -91,6 +226,43 @@ def script_resource_roots(images_dir: str = "", sounds_dir: str = "") -> List[st
         absolute = os.path.abspath(text)
         if absolute not in roots:
             roots.append(absolute)
+    return roots
+
+
+def _workflow_local_roots(
+    images_dir: str = "",
+    sounds_dir: str = "",
+    dicts_dir: str = "",
+    yolo_dir: str = "",
+    replays_dir: str = "",
+) -> List[str]:
+    from task_workflow.resource_context import (
+        bound_dicts_dir,
+        bound_images_dir,
+        bound_replays_dir,
+        bound_sounds_dir,
+        bound_yolo_dir,
+    )
+
+    values = (
+        str(images_dir or "").strip() or bound_images_dir(),
+        str(sounds_dir or "").strip() or bound_sounds_dir(),
+        str(dicts_dir or "").strip() or bound_dicts_dir(),
+        str(yolo_dir or "").strip() or bound_yolo_dir(),
+        str(replays_dir or "").strip() or bound_replays_dir(),
+    )
+    roots: List[str] = []
+    seen = set()
+    for raw in values:
+        text = str(raw or "").strip()
+        if not text:
+            continue
+        absolute = os.path.abspath(text)
+        key = os.path.normcase(absolute)
+        if key in seen:
+            continue
+        seen.add(key)
+        roots.append(absolute)
     return roots
 
 
@@ -105,7 +277,15 @@ def _is_under_root(path: str, root: str) -> bool:
     return path_key == root_key or path_key.startswith(root_key + os.sep)
 
 
-def is_allowed_script_path(path: str, images_dir: str = "", sounds_dir: str = "") -> bool:
+def is_allowed_script_path(
+    path: str,
+    images_dir: str = "",
+    sounds_dir: str = "",
+    dicts_dir: str = "",
+    yolo_dir: str = "",
+    replays_dir: str = "",
+    plugins_dir: str = "",
+) -> bool:
     text = str(path or "").strip()
     if not text:
         return False
@@ -113,7 +293,12 @@ def is_allowed_script_path(path: str, images_dir: str = "", sounds_dir: str = ""
         resolved = os.path.abspath(text)
     except Exception:
         return False
-    return any(_is_under_root(resolved, root) for root in script_resource_roots(images_dir, sounds_dir))
+    return any(
+        _is_under_root(resolved, root)
+        for root in script_resource_roots(
+            images_dir, sounds_dir, dicts_dir, yolo_dir, replays_dir, plugins_dir
+        )
+    )
 
 
 def resolve_resource_path(
@@ -121,49 +306,84 @@ def resolve_resource_path(
     images_dir: str = "",
     sounds_dir: str = "",
     enforce_jail: bool = False,
+    dicts_dir: str = "",
+    yolo_dir: str = "",
+    replays_dir: str = "",
+    plugins_dir: str = "",
 ) -> str:
     text = str(path or "").replace("\\", "/").strip()
     if not text:
         return ""
-    root = str(images_dir or "").strip() or get_images_dir("LCA")
-    sounds = str(sounds_dir or "").strip()
+    dirs = _current_dirs(images_dir, sounds_dir, dicts_dir, yolo_dir, replays_dir, plugins_dir)
+    root = dirs["images_dir"]
+    sounds = dirs["sounds_dir"]
+    app_root = get_app_root()
     candidates = []
     lowered = text.lower()
     if os.path.isabs(text):
         candidates.append(os.path.abspath(text))
-    if lowered.startswith("images/"):
-        candidates.append(os.path.join(root, text[7:]))
+    if lowered.startswith(("images/", "assets/images/")) and not lowered.startswith(
+        ("assets/images/dicts/", "images/dicts/")
+    ):
+        suffix = _kind_suffix(text, "images")
+        candidates.append(os.path.join(root, suffix))
         parent = os.path.dirname(root)
         if parent:
-            candidates.append(os.path.join(parent, text))
-    if lowered.startswith("sounds/") or lowered.endswith(tuple(AUDIO_EXTS)):
-        sounds = sounds or get_sounds_dir("LCA")
-        if lowered.startswith("sounds/"):
-            suffix = text[7:]
+            candidates.append(os.path.join(parent, f"images/{suffix}"))
+    if lowered.startswith(("sounds/", "assets/sounds/")) or lowered.endswith(tuple(AUDIO_EXTS)):
+        if lowered.startswith(("sounds/", "assets/sounds/")):
+            suffix = _kind_suffix(text, "sounds")
             candidates.append(os.path.join(sounds, suffix))
-            candidates.append(os.path.join(get_app_root(), text))
+            candidates.append(os.path.join(app_root, f"sounds/{suffix}"))
         candidates.extend(
             (
                 os.path.join(sounds, os.path.basename(text)),
                 os.path.join(sounds, text),
-                os.path.join(get_app_root(), "sounds", os.path.basename(text)),
+                os.path.join(app_root, "sounds", os.path.basename(text)),
+            )
+        )
+    if lowered.startswith("dicts/") or os.path.splitext(lowered)[1] == ".txt":
+        suffix = _kind_suffix(text, "dicts")
+        candidates.extend(
+            (
+                os.path.join(dirs["dicts_dir"], suffix),
+                os.path.join(dirs["dicts_dir"], os.path.basename(text)),
+                os.path.join(root, "dicts", os.path.basename(text)),
+            )
+        )
+    if not _is_module_offset_literal(text) and (
+        os.path.splitext(lowered)[1] in COMPONENT_EXTS or lowered.startswith("plugins/")
+    ):
+        suffix = _kind_suffix(text, "plugins")
+        candidates.extend(
+            (
+                os.path.join(dirs["plugins_dir"], suffix),
+                os.path.join(dirs["plugins_dir"], os.path.basename(text)),
+                os.path.join(get_plugin_dir(), suffix),
+                os.path.join(get_plugin_dir(), os.path.basename(text)),
+                os.path.join(get_user_data_dir("LCA"), "components", suffix),
+                os.path.join(get_user_data_dir("LCA"), "components", os.path.basename(text)),
             )
         )
     candidates.append(os.path.join(root, os.path.basename(text)))
     candidates.append(os.path.join(root, text))
-    app_root = get_app_root()
     if lowered.endswith(".onnx") or lowered.startswith("yolo/"):
+        suffix = _kind_suffix(text, "yolo")
         candidates.extend(
             (
+                os.path.join(dirs["yolo_dir"], suffix),
+                os.path.join(dirs["yolo_dir"], os.path.basename(text)),
+                os.path.join(root, "yolo", os.path.basename(text)),
                 os.path.join(app_root, text),
                 os.path.join(app_root, "yolo", os.path.basename(text)),
-                os.path.join(get_images_dir("LCA"), os.path.basename(text)),
             )
         )
     if lowered.endswith(".replay.json") or lowered.startswith("replays/"):
-        suffix = text[8:] if lowered.startswith("replays/") else os.path.basename(text)
+        suffix = _kind_suffix(text, "replays")
         candidates.extend(
             (
+                os.path.join(dirs["replays_dir"], suffix),
+                os.path.join(dirs["replays_dir"], os.path.basename(text)),
                 os.path.join(app_root, text),
                 os.path.join(app_root, "replays", os.path.basename(text)),
                 os.path.join(root, "replays", os.path.basename(text)),
@@ -184,11 +404,40 @@ def resolve_resource_path(
         if not candidate:
             continue
         absolute = os.path.abspath(candidate)
-        if enforce_jail and not is_allowed_script_path(absolute, images_dir, sounds_dir):
+        if enforce_jail and not is_allowed_script_path(
+            absolute,
+            images_dir=dirs["images_dir"],
+            sounds_dir=dirs["sounds_dir"],
+            dicts_dir=dirs["dicts_dir"],
+            yolo_dir=dirs["yolo_dir"],
+            replays_dir=dirs["replays_dir"],
+            plugins_dir=dirs["plugins_dir"],
+        ):
             continue
         allowed.append(absolute)
         if os.path.exists(absolute):
             existing.append(absolute)
+    local_roots = _workflow_local_roots(
+        images_dir,
+        sounds_dir,
+        dicts_dir,
+        yolo_dir,
+        replays_dir,
+    )
+    if local_roots:
+        for absolute in existing:
+            if any(_is_under_root(absolute, root) for root in local_roots):
+                return absolute
+    try:
+        from app_core.lca_format.session import get_active
+
+        session = get_active()
+        if session is not None:
+            packaged = session.resolve_asset(text)
+            if packaged and os.path.isfile(packaged):
+                return packaged
+    except Exception:
+        pass
     if existing:
         return existing[0]
     if allowed:
@@ -198,73 +447,99 @@ def resolve_resource_path(
     return os.path.abspath(candidates[0]) if candidates else text
 
 
-def constrain_script_path(path: str, images_dir: str = "", sounds_dir: str = "") -> str:
+def constrain_script_path(
+    path: str,
+    images_dir: str = "",
+    sounds_dir: str = "",
+    dicts_dir: str = "",
+    yolo_dir: str = "",
+    replays_dir: str = "",
+    plugins_dir: str = "",
+) -> str:
     text = str(path or "").strip()
     if not text:
         raise ValueError("缺少资源路径")
+    dirs = _current_dirs(images_dir, sounds_dir, dicts_dir, yolo_dir, replays_dir, plugins_dir)
+    jail_kwargs = dict(
+        images_dir=dirs["images_dir"],
+        sounds_dir=dirs["sounds_dir"],
+        dicts_dir=dirs["dicts_dir"],
+        yolo_dir=dirs["yolo_dir"],
+        replays_dir=dirs["replays_dir"],
+        plugins_dir=dirs["plugins_dir"],
+    )
     if os.path.isabs(text):
         projected = os.path.abspath(text)
-        if not is_allowed_script_path(projected, images_dir, sounds_dir):
+        if not is_allowed_script_path(projected, **jail_kwargs):
             raise ValueError("脚本不能访问该路径")
         return projected
-    located = resolve_resource_path(text, images_dir, sounds_dir, enforce_jail=False)
+    located = resolve_resource_path(text, enforce_jail=False, **jail_kwargs)
     if located and os.path.exists(located):
         projected = os.path.abspath(located)
     else:
-        root = str(images_dir or "").strip() or get_images_dir("LCA")
+        root = dirs["images_dir"]
         lowered = text.replace("\\", "/").lower()
+        normalized = text.replace("\\", "/")
         if lowered.startswith("images/"):
-            projected = os.path.abspath(os.path.join(root, text.replace("\\", "/")[7:]))
+            projected = os.path.abspath(os.path.join(root, normalized[7:]))
         elif lowered.startswith("sounds/"):
-            sounds = str(sounds_dir or "").strip() or get_sounds_dir("LCA")
-            projected = os.path.abspath(os.path.join(sounds, text.replace("\\", "/")[7:]))
+            projected = os.path.abspath(os.path.join(dirs["sounds_dir"], normalized[7:]))
+        elif lowered.startswith("dicts/"):
+            projected = os.path.abspath(os.path.join(dirs["dicts_dir"], normalized[6:]))
         elif lowered.startswith("yolo/") or lowered.endswith(".onnx"):
-            projected = os.path.abspath(os.path.join(get_app_root(), text.replace("\\", "/")))
+            projected = os.path.abspath(os.path.join(dirs["yolo_dir"], _kind_suffix(normalized, "yolo")))
         elif lowered.startswith("replays/") or lowered.endswith(".replay.json"):
-            projected = os.path.abspath(os.path.join(get_app_root(), text.replace("\\", "/")))
+            projected = os.path.abspath(os.path.join(dirs["replays_dir"], _kind_suffix(normalized, "replays")))
+        elif lowered.startswith("plugins/") and not _is_module_offset_literal(normalized):
+            projected = os.path.abspath(os.path.join(dirs["plugins_dir"], _kind_suffix(normalized, "plugins")))
         else:
             projected = os.path.abspath(os.path.join(root, text))
-    if not is_allowed_script_path(projected, images_dir, sounds_dir):
+    if not is_allowed_script_path(projected, **jail_kwargs):
         raise ValueError("脚本不能访问该路径")
     if os.path.isabs(text):
         return projected
     return text.replace("\\", "/")
 
 
-def script_path_for_file(abs_path: str, kind: str = "", images_dir: str = "", sounds_dir: str = "") -> str:
+def _relative_kind_path(absolute: str, kind_dir: str, folder: str) -> str:
+    root = os.path.abspath(str(kind_dir or "").strip())
+    if not root:
+        return f"{folder}/{os.path.basename(absolute)}"
+    root_prefix = os.path.normcase(root) + os.sep
+    abs_key = os.path.normcase(absolute)
+    if abs_key == os.path.normcase(root):
+        return folder
+    if abs_key.startswith(root_prefix):
+        relative = os.path.relpath(absolute, root).replace(os.sep, "/")
+        return f"{folder}/{relative}"
+    return f"{folder}/{os.path.basename(absolute)}"
+
+
+def script_path_for_file(
+    abs_path: str,
+    kind: str = "",
+    images_dir: str = "",
+    sounds_dir: str = "",
+    dicts_dir: str = "",
+    yolo_dir: str = "",
+    replays_dir: str = "",
+    plugins_dir: str = "",
+) -> str:
     text = str(abs_path or "").strip()
     if not text:
         return ""
     absolute = os.path.abspath(text)
+    dirs = _current_dirs(images_dir, sounds_dir, dicts_dir, yolo_dir, replays_dir, plugins_dir)
     detected = kind or resource_kind(text)
     if detected == "model":
-        app_root = os.path.abspath(get_app_root())
-        try:
-            relative = os.path.relpath(absolute, app_root).replace(os.sep, "/")
-        except ValueError:
-            relative = os.path.basename(absolute)
-        if relative.startswith("yolo/") or relative.endswith(".onnx"):
-            return relative
-        return f"yolo/{os.path.basename(absolute)}"
+        return _relative_kind_path(absolute, dirs["yolo_dir"], "yolo")
     if detected == "replay":
-        app_root = os.path.abspath(get_app_root())
-        try:
-            relative = os.path.relpath(absolute, app_root).replace(os.sep, "/")
-        except ValueError:
-            relative = os.path.basename(absolute)
-        if relative.startswith("replays/") or relative.endswith(".replay.json"):
-            return relative
-        return f"replays/{os.path.basename(absolute)}"
+        return _relative_kind_path(absolute, dirs["replays_dir"], "replays")
     if detected == "audio":
-        root = os.path.abspath(str(sounds_dir or "").strip() or get_sounds_dir("LCA"))
-        root_prefix = os.path.normcase(root) + os.sep
-        if os.path.normcase(absolute) == os.path.normcase(root):
-            return "sounds"
-        if os.path.normcase(absolute).startswith(root_prefix):
-            relative = os.path.relpath(absolute, root).replace(os.sep, "/")
-            return f"sounds/{relative}"
-        return f"sounds/{os.path.basename(absolute)}"
-    root = os.path.abspath(str(images_dir or "").strip() or get_images_dir("LCA"))
+        return _relative_kind_path(absolute, dirs["sounds_dir"], "sounds")
+    if detected == "component":
+        return _relative_kind_path(absolute, dirs["plugins_dir"], "plugins")
+    root = os.path.abspath(dirs["images_dir"] or get_images_dir("LCA"))
     root_prefix = os.path.normcase(root) + os.sep
     if os.path.normcase(absolute) == os.path.normcase(root):
         return "images"
@@ -296,16 +571,24 @@ def list_script_resources(
     card_id: Optional[int] = None,
     workflow_token: str = "",
     sounds_dir: str = "",
+    dicts_dir: str = "",
+    yolo_dir: str = "",
+    replays_dir: str = "",
+    plugins_dir: str = "",
 ) -> List[Dict[str, Any]]:
+    dirs = _current_dirs(images_dir, sounds_dir, dicts_dir, yolo_dir, replays_dir, plugins_dir)
     used: Dict[str, Dict[str, Any]] = {}
     for value, start, end in extract_string_literals(source):
+        call = enclosing_call_name(source, start)
+        if call.startswith("大漠内存.") or call.startswith("大漠汇编."):
+            continue
         kind = resource_kind(value)
         if not kind:
             continue
         key = value.replace("\\", "/")
         item = used.get(key)
         if item is None:
-            abs_path = resolve_resource_path(value, images_dir, sounds_dir, enforce_jail=False)
+            abs_path = resolve_resource_path(value, enforce_jail=False, **dirs)
             item = {
                 "kind": kind,
                 "path": key,
@@ -321,9 +604,14 @@ def list_script_resources(
         item["spans"].append((start, end))
     listed = {os.path.normcase(str(item.get("abs_path") or "")) for item in used.values()}
     extras = []
-    extra_roots = [images_dir]
-    if sounds_dir:
-        extra_roots.append(sounds_dir)
+    extra_roots = [
+        dirs["images_dir"],
+        dirs["sounds_dir"],
+        dirs["dicts_dir"],
+        dirs["yolo_dir"],
+        dirs["replays_dir"],
+        dirs["plugins_dir"],
+    ]
     for root in extra_roots:
         for abs_path in list_card_files(root, card_id, workflow_token):
             if os.path.normcase(abs_path) in listed:
@@ -332,7 +620,7 @@ def list_script_resources(
             extras.append(
                 {
                     "kind": kind,
-                    "path": script_path_for_file(abs_path, kind, images_dir, sounds_dir),
+                    "path": script_path_for_file(abs_path, kind, **dirs),
                     "abs_path": abs_path,
                     "name": os.path.basename(abs_path),
                     "exists": True,
@@ -384,29 +672,38 @@ def import_resource_file(
     workflow_token: str = "",
     kind: str = "",
     sounds_dir: str = "",
+    dicts_dir: str = "",
+    yolo_dir: str = "",
+    replays_dir: str = "",
+    plugins_dir: str = "",
 ) -> Dict[str, Any]:
     source = os.path.abspath(str(src_path or "").strip())
     if not os.path.isfile(source):
         raise FileNotFoundError(source)
+    dirs = _current_dirs(images_dir, sounds_dir, dicts_dir, yolo_dir, replays_dir, plugins_dir)
     detected = kind or resource_kind(source) or "image"
     if detected == "model":
-        directory = os.path.join(get_app_root(), "yolo")
+        directory = dirs["yolo_dir"]
     elif detected == "replay":
-        directory = os.path.join(get_app_root(), "replays")
+        directory = dirs["replays_dir"]
     elif detected == "audio":
-        directory = str(sounds_dir or "").strip() or get_sounds_dir("LCA")
+        directory = dirs["sounds_dir"]
+    elif detected == "component":
+        directory = dirs["plugins_dir"]
     else:
-        directory = str(images_dir or "").strip() or get_images_dir("LCA")
+        directory = dirs["images_dir"]
     os.makedirs(directory, exist_ok=True)
     name = os.path.basename(source)
     dest = os.path.join(directory, name)
     if os.path.normcase(os.path.abspath(dest)) != os.path.normcase(source):
+        prefixes = card_filename_prefixes(card_id, workflow_token)
+        prefix = prefixes[0] if prefixes else ""
+        preferred = f"{prefix}{name}" if prefix else name
+        dest = os.path.join(directory, preferred)
         if os.path.exists(dest):
-            prefixes = card_filename_prefixes(card_id, workflow_token)
-            prefix = prefixes[0] if prefixes else ""
-            dest = _unique_dest(directory, f"{prefix}{name}" if prefix else name)
+            dest = _unique_dest(directory, preferred)
         shutil.copy2(source, dest)
-    path = script_path_for_file(dest, detected, images_dir, sounds_dir)
+    path = script_path_for_file(dest, detected, **dirs)
     return {
         "kind": detected,
         "path": path,

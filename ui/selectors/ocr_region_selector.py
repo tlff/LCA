@@ -46,6 +46,18 @@ from utils.window.window_activation_utils import (
     schedule_overlay_activation_boost,
     show_and_activate_overlay,
 )
+from themes import get_theme_manager
+from ui.selectors.selection_adjust import (
+    apply_overlay_adjust_button_style,
+    create_overlay_adjust_buttons,
+    cursor_for_selection_hit,
+    hit_test_selection,
+    move_rect_by,
+    resize_rect_by_corner,
+    scale_rect_by_wheel,
+    update_adjust_buttons_position,
+    wheel_event_delta_y,
+)
 
 # Windows API 相关导入
 try:
@@ -73,6 +85,12 @@ class OCRRegionSelectorOverlay(QWidget):
         # 选择状态
         self.selecting = False
         self.selection_pending = False
+        self.selection_ready = False
+        self.dragging_selection = False
+        self.resizing_selection = False
+        self.resize_mode = None
+        self.resize_margin = 8
+        self.drag_last_pos = QPoint()
         self.start_pos = QPoint()
         self.end_pos = QPoint()
         self.selection_rect = QRect()
@@ -80,21 +98,26 @@ class OCRRegionSelectorOverlay(QWidget):
         self.target_window_rect = QRect()
         self.screenshot = None
         self.window_pixmap = None
+        self.hint_text = "拖动框选 | 右键或 ESC 取消"
 
         # 窗口激活状态标志
         self._is_ready_for_input = False
         self._activation_attempts = 0
 
         configure_opaque_picker_overlay(self)
+        self.confirm_button, self.reselect_button = create_overlay_adjust_buttons(
+            self,
+            self._confirm_selection,
+            self._reset_selection,
+        )
+        get_theme_manager().register_theme_change_callback(self._on_adjust_theme_changed)
 
         logger.info("创建OCR区域选择覆盖层")
-
-        # 显示提示信息
         logger.info("OCR区域选择器已启动")
         logger.info("使用说明:")
         logger.info("在绿色边框的目标窗口内拖拽鼠标进行选择")
+        logger.info("框选后可用滚轮缩放、四角调大小、拖动边框移动，再点确定")
         logger.info("右键点击或按ESC键取消选择")
-        logger.info("选择完成后会自动填充坐标参数")
         
     def setup_target_window(self):
         """设置目标窗口并进行截图"""
@@ -304,6 +327,12 @@ class OCRRegionSelectorOverlay(QWidget):
         if not self.window_info:
             self.target_window_rect = QRect()
             return QRect()
+
+        if (
+            (self.selection_ready or self.dragging_selection or self.resizing_selection)
+            and not self.target_window_rect.isEmpty()
+        ):
+            return QRect(self.target_window_rect)
 
         if self.selecting and not force and not self.target_window_rect.isEmpty():
             return QRect(self.target_window_rect)
@@ -527,6 +556,96 @@ class OCRRegionSelectorOverlay(QWidget):
     def _save_selection_debug_image(self, x: int, y: int, width: int, height: int):
         """调试图像保存功能已禁用"""
 
+    def _on_adjust_theme_changed(self, _theme=None) -> None:
+        apply_overlay_adjust_button_style(self.confirm_button, self.reselect_button)
+
+    def _selection_bounds(self) -> QRect:
+        target = self._get_target_window_rect(refresh=False)
+        if target.isEmpty():
+            return QRect(self.rect())
+        return QRect(target)
+
+    def _apply_selection_rect(self, rect: QRect) -> None:
+        self.start_pos = rect.topLeft()
+        self.end_pos = QPoint(rect.right(), rect.bottom())
+        _, info_text = self._build_selection_visual_state(self.end_pos)
+        self._update_selection_visual_state(rect, info_text)
+        if self.selection_ready:
+            self._update_action_buttons_position()
+
+    def _set_selection_ready(self, ready: bool) -> None:
+        self.selection_ready = bool(ready)
+        self.dragging_selection = False
+        self.resizing_selection = False
+        self.resize_mode = None
+        if self.selection_ready:
+            self.hint_text = "滚轮缩放 | 四角调大小 | 拖动边框移动 | 点“确定”保存 | 右键或 ESC 取消"
+            self._release_mouse_capture()
+            self.confirm_button.show()
+            self.reselect_button.show()
+            self._update_action_buttons_position()
+            self.setCursor(Qt.CursorShape.SizeAllCursor)
+        else:
+            self.hint_text = "拖动框选 | 右键或 ESC 取消"
+            self.confirm_button.hide()
+            self.reselect_button.hide()
+            self.setCursor(Qt.CursorShape.CrossCursor)
+        self.update()
+
+    def _update_action_buttons_position(self) -> None:
+        if not self.selection_ready or self.selection_rect.isEmpty():
+            return
+        update_adjust_buttons_position(
+            self.confirm_button,
+            self.reselect_button,
+            self.selection_rect,
+            self.rect(),
+        )
+
+    def _confirm_selection(self) -> None:
+        if self.selection_rect.isEmpty() or not self.selection_ready:
+            QMessageBox.warning(self, "提示", "请先框选有效区域")
+            return
+        self._emit_region_and_close(QRect(self.selection_rect))
+
+    def _reset_selection(self) -> None:
+        self.selecting = False
+        self.selection_pending = False
+        self._release_mouse_capture()
+        self.start_pos = QPoint()
+        self.end_pos = QPoint()
+        self._update_selection_visual_state(QRect(), "")
+        self._set_selection_ready(False)
+
+    def _emit_region_and_close(self, rect: QRect) -> None:
+        if rect.width() <= 10 or rect.height() <= 10:
+            QMessageBox.warning(self, "提示", "请先框选有效区域")
+            return
+
+        if self.window_info:
+            relative_rect = self._convert_rect_to_relative_coordinates(rect)
+            if relative_rect.isEmpty():
+                logger.warning("选择区域与目标窗口没有有效交集")
+                QMessageBox.warning(self, "提示", "选择区域与目标窗口没有有效交集")
+                return
+            logger.info(
+                "区域选择完成: (%s, %s, %s, %s)",
+                relative_rect.x(),
+                relative_rect.y(),
+                relative_rect.width(),
+                relative_rect.height(),
+            )
+            self.region_selected.emit(
+                relative_rect.x(),
+                relative_rect.y(),
+                relative_rect.width(),
+                relative_rect.height(),
+            )
+        else:
+            logger.warning("没有窗口信息，使用屏幕坐标")
+            self.region_selected.emit(rect.x(), rect.y(), rect.width(), rect.height())
+        self.close()
+
     def _is_point_in_target_window(self, qt_screen_pos: QPoint) -> bool:
         """Check whether a point is inside the target window client area in Qt logical coordinates."""
         if not self.window_info:
@@ -554,21 +673,40 @@ class OCRRegionSelectorOverlay(QWidget):
         if self.window_info:
             draw_target_window_overlay(painter, target_rect)
 
-        if self.selecting and not self.selection_rect.isEmpty():
+        if not self.selection_rect.isEmpty():
             draw_selection_overlay(painter, self.selection_rect, info_text=self.selection_info_text)
 
         apply_overlay_text_style(painter)
-        painter.drawText(50, 50, "拖动框选 | 右键或 ESC 取消")
+        painter.drawText(50, 50, self.hint_text)
 
     def mousePressEvent(self, event):
         """按下后立刻开始框选，中途不再抢前台，避免把拖拽掐断。"""
         if event.button() == Qt.MouseButton.LeftButton:
             self._refresh_target_window_rect(force=True)
-            target_rect = self._get_target_window_rect(refresh=False)
-            if target_rect.isEmpty():
-                self.start_pos = QPoint(event.pos())
-            else:
-                self.start_pos = self._clamp_point_to_target_window(event.pos())
+            click_pos = self._clamp_point_to_target_window(event.pos())
+
+            if self.selection_ready and not self.selection_rect.isEmpty():
+                hit_mode = hit_test_selection(click_pos, self.selection_rect, self.resize_margin)
+                if hit_mode:
+                    self.drag_last_pos = click_pos
+                    if hit_mode == "move":
+                        self.dragging_selection = True
+                        self.resizing_selection = False
+                        self.resize_mode = None
+                    else:
+                        self.dragging_selection = False
+                        self.resizing_selection = True
+                        self.resize_mode = hit_mode
+                    self.setCursor(cursor_for_selection_hit(hit_mode))
+                    try:
+                        self.grabMouse()
+                    except Exception as exc:
+                        logger.warning(f"抓取鼠标失败，拖拽可能不稳定: {exc}")
+                    event.accept()
+                    return
+
+            self._set_selection_ready(False)
+            self.start_pos = click_pos
             self.end_pos = self.start_pos
             self.selecting = False
             self.selection_pending = True
@@ -610,16 +748,65 @@ class OCRRegionSelectorOverlay(QWidget):
                 selection_rect, info_text = self._build_selection_visual_state(new_end_pos)
                 self._update_selection_visual_state(selection_rect, info_text)
             event.accept()
-        else:
-            # 设置鼠标样式
-            if self.window_info and self._is_point_in_target_window(event.pos()):
+            return
+
+        if self.dragging_selection:
+            new_pos = self._clamp_point_to_target_window(event.pos())
+            delta = new_pos - self.drag_last_pos
+            if delta.x() != 0 or delta.y() != 0:
+                self._apply_selection_rect(
+                    move_rect_by(self.selection_rect, delta.x(), delta.y(), self._selection_bounds())
+                )
+                self.drag_last_pos = new_pos
+            event.accept()
+            return
+
+        if self.resizing_selection:
+            new_pos = self._clamp_point_to_target_window(event.pos())
+            delta = new_pos - self.drag_last_pos
+            if delta.x() != 0 or delta.y() != 0:
+                self._apply_selection_rect(
+                    resize_rect_by_corner(
+                        self.selection_rect,
+                        self.resize_mode,
+                        delta.x(),
+                        delta.y(),
+                        self._selection_bounds(),
+                    )
+                )
+                self.drag_last_pos = new_pos
+            event.accept()
+            return
+
+        if self.selection_ready and not self.selection_rect.isEmpty():
+            hit_mode = hit_test_selection(event.pos(), self.selection_rect, self.resize_margin)
+            if hit_mode:
+                self.setCursor(cursor_for_selection_hit(hit_mode))
+            elif self.window_info and self._is_point_in_target_window(event.pos()):
                 self.setCursor(Qt.CursorShape.CrossCursor)
             else:
                 self.setCursor(Qt.CursorShape.ArrowCursor)
+        elif self.window_info and self._is_point_in_target_window(event.pos()):
+            self.setCursor(Qt.CursorShape.CrossCursor)
+        else:
+            self.setCursor(Qt.CursorShape.ArrowCursor)
 
     def mouseReleaseEvent(self, event):
         """鼠标释放事件"""
-        if event.button() == Qt.MouseButton.LeftButton and (self.selection_pending or self.selecting):
+        if event.button() != Qt.MouseButton.LeftButton:
+            return
+
+        if self.dragging_selection or self.resizing_selection:
+            self.dragging_selection = False
+            self.resizing_selection = False
+            self.resize_mode = None
+            if self.selection_ready:
+                self._release_mouse_capture()
+                self._update_action_buttons_position()
+            event.accept()
+            return
+
+        if self.selection_pending or self.selecting:
             was_selecting = self.selecting
             self.selection_pending = False
             self.selecting = False
@@ -631,51 +818,21 @@ class OCRRegionSelectorOverlay(QWidget):
                 return
 
             release_pos = self._clamp_point_to_target_window(event.pos())
-
-            # 计算选择区域
             rect = QRect(self.start_pos, release_pos).normalized()
             logger.info(f"鼠标释放: 矩形={rect}")
 
             if rect.width() > 10 and rect.height() > 10:
-                if self.window_info:
-                    # 统一裁剪到目标窗口客户区，允许拖拽略微越界
-                    relative_rect = self._convert_rect_to_relative_coordinates(rect)
-                    if relative_rect.isEmpty():
-                        logger.warning("选择区域与目标窗口没有有效交集")
-                        self.setCursor(Qt.CursorShape.ArrowCursor)
-                        self._update_selection_visual_state(QRect(), "")
-                        event.accept()
-                        return
-
-                    logger.info("===== 区域选择完成诊断 =====")
-                    logger.info(f"区域选择完成: ({relative_rect.x()}, {relative_rect.y()}, {relative_rect.width()}, {relative_rect.height()})")
-                    logger.info("这些坐标应该是相对于客户区左上角的物理像素坐标")
-
-                    # 打印窗口信息用于验证
-                    if self.window_info:
-                        import win32gui
-                        window_rect = win32gui.GetWindowRect(self.window_info['hwnd'])
-                        client_screen_pos = self.window_info['client_screen_pos']
-                        logger.info(f"窗口矩形(屏幕): {window_rect}")
-                        logger.info(f"客户区屏幕位置: {client_screen_pos}")
-                        logger.info(f"标题栏高度估算: {client_screen_pos[1] - window_rect[1]}px")
-                        logger.info(f"客户区尺寸: {self.window_info['client_width']}x{self.window_info['client_height']}")
-
-                    # 发射选择信号
-                    self.region_selected.emit(relative_rect.x(), relative_rect.y(),
-                                            relative_rect.width(), relative_rect.height())
-                else:
-                    logger.warning("没有窗口信息，使用屏幕坐标")
-                    self.region_selected.emit(rect.x(), rect.y(), rect.width(), rect.height())
-
-                self.close()
+                self.end_pos = release_pos
+                selection_rect, info_text = self._build_selection_visual_state(release_pos)
+                self._update_selection_visual_state(selection_rect, info_text)
+                self._set_selection_ready(True)
             else:
                 logger.warning(f"选择区域太小: {rect.width()}x{rect.height()}")
                 self.setCursor(Qt.CursorShape.ArrowCursor)
                 self._update_selection_visual_state(QRect(), "")
 
             event.accept()
-                
+
     def keyPressEvent(self, event):
         """键盘事件"""
         if event.key() == Qt.Key.Key_Escape:
@@ -685,11 +842,41 @@ class OCRRegionSelectorOverlay(QWidget):
             self._release_mouse_capture()
             self.close()
             event.accept()
-        else:
-            super().keyPressEvent(event)
+            return
+
+        if self.selection_ready and event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            self._confirm_selection()
+            event.accept()
+            return
+
+        super().keyPressEvent(event)
+
+    def wheelEvent(self, event):
+        if (
+            not self.selection_ready
+            or self.selection_rect.isEmpty()
+            or self.selecting
+            or self.dragging_selection
+            or self.resizing_selection
+        ):
+            event.ignore()
+            return
+
+        delta_y = wheel_event_delta_y(event)
+        if delta_y == 0:
+            event.accept()
+            return
+
+        self._apply_selection_rect(
+            scale_rect_by_wheel(self.selection_rect, self._selection_bounds(), delta_y)
+        )
+        event.accept()
 
     def mouseDoubleClickEvent(self, event):
-        """双击事件 - 关闭覆盖层"""
+        if self.selection_ready and not self.selection_rect.isEmpty():
+            self._confirm_selection()
+            event.accept()
+            return
         logger.info("双击关闭覆盖层")
         self.selecting = False
         self.selection_pending = False
@@ -723,7 +910,14 @@ class OCRRegionSelectorOverlay(QWidget):
         self._closing = True
         self.selecting = False
         self.selection_pending = False
+        self.selection_ready = False
+        self.dragging_selection = False
+        self.resizing_selection = False
         self._release_mouse_capture()
+        try:
+            get_theme_manager().unregister_theme_change_callback(self._on_adjust_theme_changed)
+        except Exception:
+            pass
         logger.info("OCR区域选择器关闭，发出关闭信号")
         self.overlay_closed.emit()
         super().closeEvent(event)
@@ -1072,6 +1266,10 @@ class OCRRegionSelectorWidget(QWidget):
             logger.info("清理之前的覆盖层")
             overlay._closing = True
             overlay.selecting = False
+            overlay.selection_pending = False
+            overlay.selection_ready = False
+            overlay.dragging_selection = False
+            overlay.resizing_selection = False
             overlay.start_pos = QPoint()
             overlay.end_pos = QPoint()
             try:

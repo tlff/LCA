@@ -46,11 +46,25 @@ def create_inprocess_runtime(
     session_mode = str(payload.get("session_mode") or "single").strip().lower()
     cards_data = payload.get("cards_data") or {}
     connections_data = payload.get("connections_data") or []
+    images_dir = payload.get("images_dir")
+    sounds_dir = payload.get("sounds_dir")
+    dicts_dir = payload.get("dicts_dir")
+    yolo_dir = payload.get("yolo_dir")
+    replays_dir = payload.get("replays_dir")
+    plugins_dir = payload.get("plugins_dir")
+    from task_workflow.resource_context import bind_resource_dirs
+
+    bind_resource_dirs(payload)
     common_kwargs = dict(
         task_modules=modules,
         target_window_title=payload.get("target_window_title"),
         execution_mode=execution_mode,
-        images_dir=payload.get("images_dir"),
+        images_dir=images_dir,
+        sounds_dir=sounds_dir,
+        dicts_dir=dicts_dir,
+        yolo_dir=yolo_dir,
+        replays_dir=replays_dir,
+        plugins_dir=plugins_dir,
         target_hwnd=payload.get("target_hwnd"),
         workflow_id=payload.get("workflow_id"),
         workflow_filepath=payload.get("workflow_filepath"),

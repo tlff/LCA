@@ -152,16 +152,6 @@ def get_params_definition() -> Dict[str, Dict[str, Any]]:
             "tooltip": "单图识别：只配置一张图片；多图识别：配置多张图片进行识别",
             "condition": {"param": "operation_mode", "value": "找图功能"}
         },
-        "enable_parallel_recognition": {
-            "label": "启用并行识别",
-            "type": "checkbox",
-            "default": True,
-            "tooltip": "启用：多张图片并行识别，速度提升3-5倍；禁用：传统串行识别",
-            "condition": [
-                {"param": "operation_mode", "value": "找图功能"},
-                {"param": "multi_image_mode", "value": "多图识别"}
-            ]
-        },
         "image_path": {
             "label": "目标图片路径",
             "type": "file",
@@ -425,7 +415,7 @@ def get_params_definition() -> Dict[str, Dict[str, Any]]:
             "type": "select",
             "options": ["完整点击", "双击", "仅按下", "仅松开"],
             "default": "完整点击",
-            "tooltip": "完整点击：按下并松开；双击：连续两次点击；仅按下：按下不松开；仅松开：松开按钮",
+            "tooltip": "完整点击：按下并松开；双击：发送标准双击消息序列；仅按下：按下不松开；仅松开：只松开不按下",
             "condition": {"param": "operation_mode", "value": "找图功能"}
         },
         "image_enable_auto_release": {
@@ -580,7 +570,7 @@ def get_params_definition() -> Dict[str, Dict[str, Any]]:
             "type": "select",
             "options": ["完整点击", "双击", "仅按下", "仅松开"],
             "default": "完整点击",
-            "tooltip": "完整点击：按下并松开；双击：连续两次点击；仅按下：按下不松开；仅松开：松开按钮",
+            "tooltip": "完整点击：按下并松开；双击：发送标准双击消息序列；仅按下：按下不松开；仅松开：只松开不按下",
             "condition": {"param": "operation_mode", "value": "文字点击"}
         },
         "text_enable_auto_release": {
@@ -807,7 +797,7 @@ def get_params_definition() -> Dict[str, Dict[str, Any]]:
             "type": "select",
             "options": ["完整点击", "双击", "仅按下", "仅松开"],
             "default": "完整点击",
-            "tooltip": "完整点击：按下并松开；双击：连续两次点击；仅按下：按下不松开；仅松开：松开按钮",
+            "tooltip": "完整点击：按下并松开；双击：发送标准双击消息序列；仅按下：按下不松开；仅松开：只松开不按下",
             "condition": {"param": "operation_mode", "value": "找色功能"}
         },
         "color_enable_auto_release": {
@@ -1021,7 +1011,7 @@ def get_params_definition() -> Dict[str, Dict[str, Any]]:
             "type": "select",
             "options": ["完整点击", "双击", "仅按下", "仅松开"],
             "default": "完整点击",
-            "tooltip": "完整点击：按下并松开；双击：连续两次点击；仅按下：按下不松开；仅松开：松开按钮",
+            "tooltip": "完整点击：按下并松开；双击：发送标准双击消息序列；仅按下：按下不松开；仅松开：只松开不按下",
             "condition": {"param": "operation_mode", "value": "坐标点击"}
         },
         "coordinate_enable_auto_release": {
@@ -1149,7 +1139,7 @@ def get_params_definition() -> Dict[str, Dict[str, Any]]:
             "type": "select",
             "options": ["简单拖拽", "多点路径拖拽"],
             "default": "简单拖拽",
-            "tooltip": "简单拖拽: 直线移动\n多点路径: 沿复杂路径",
+            "tooltip": "简单拖拽: 直线移动\n多点路径: 在目标窗口按住左键划线，松开完成",
             "condition": {"param": "operation_mode", "value": "鼠标拖拽"}
         },
 
@@ -1441,7 +1431,7 @@ def get_params_definition() -> Dict[str, Dict[str, Any]]:
             "label": "路径点坐标",
             "type": "textarea",
             "default": "100,100\n200,150\n300,200\n400,250",
-            "tooltip": "每行一个坐标: x,y,time\n如: 100,100,0.5",
+            "tooltip": "每行一个坐标: x,y,time\n如: 100,100,0.5\n用「划线获取路径」在目标窗口按住左键划线，松开完成",
             "rows": 8,
             "condition": {
                 "param": "operation_mode",
@@ -1756,7 +1746,7 @@ def get_params_definition() -> Dict[str, Dict[str, Any]]:
             "type": "select",
             "options": ["完整点击", "双击", "仅按下", "仅松开"],
             "default": "完整点击",
-            "tooltip": "完整点击：按下并松开；双击：连续两次点击；仅按下：按下不松开；仅松开：松开按钮",
+            "tooltip": "完整点击：按下并松开；双击：发送标准双击消息序列；仅按下：按下不松开；仅松开：只松开不按下",
             "condition": {
                 "param": "operation_mode",
                 "value": "鼠标移动",

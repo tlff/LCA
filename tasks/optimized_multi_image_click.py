@@ -1,13 +1,4 @@
-﻿"""
-优化的多图识别点击模块 - 并行处理版本
-替换原有的串行多图识别，显著提升性能
-
-性能提升：
-- 并行图片识别：3-5倍速度提升
-- 智能截图复用：减少50%以上I/O开销  
-- 优化延迟策略：减少不必要等待
-- 错误隔离处理：提高稳定性
-"""
+"""多图识别：并行匹配后点击，不做预处理，不改走串行。"""
 
 import time
 import logging
@@ -76,7 +67,6 @@ def execute_multi_image_click_optimized(params: Dict[str, Any], execution_mode: 
         image_paths_text = format_resource_text(params.get('image_paths', ''))
         click_all_found = resolve_multi_image_flag(params, 'click_all_found', False)
         clear_clicked_on_next_run = resolve_multi_image_flag(params, 'clear_clicked_on_next_run', False)
-        enable_parallel = resolve_multi_image_flag(params, 'enable_parallel_recognition', True)
 
         if not image_paths_text:
             logger.error("多图识别模式下未配置图片路径")
@@ -91,7 +81,7 @@ def execute_multi_image_click_optimized(params: Dict[str, Any], execution_mode: 
             _show_no_images_found_dialog(raw_paths)
             return _handle_failure(on_failure_action, failure_jump_id, card_id)
 
-        logger.info(f"[优化多图识别] 开始执行，共{len(image_paths)}张图片，全部点击: {click_all_found}，并行: {enable_parallel}")
+        logger.info(f"[多图识别] 开始并行识别，共{len(image_paths)}张图片，全部点击: {click_all_found}")
 
         remaining_images = resolve_multi_image_remaining(
             image_paths,
@@ -104,27 +94,14 @@ def execute_multi_image_click_optimized(params: Dict[str, Any], execution_mode: 
             logger.error("多图识别模式下没有可处理的图片")
             return _handle_failure(on_failure_action, failure_jump_id, card_id)
 
-        # 执行图片识别（并行或串行）
-        # 只有当明确启用并行识别时才使用并行模式
-        if enable_parallel and len(remaining_images) >= 1:
-            recognition_results = _execute_parallel_recognition(
-                remaining_images,
-                params,
-                execution_mode,
-                target_hwnd,
-                get_image_data,
-                stop_checker,
-            )
-        else:
-            recognition_results = _execute_serial_recognition(
-                remaining_images,
-                params,
-                execution_mode,
-                target_hwnd,
-                get_image_data,
-                card_id,
-                stop_checker,
-            )
+        recognition_results = _execute_parallel_recognition(
+            remaining_images,
+            params,
+            execution_mode,
+            target_hwnd,
+            get_image_data,
+            stop_checker,
+        )
 
         if _is_stop_requested(stop_checker):
             return _stop_result()
@@ -167,10 +144,6 @@ def _show_no_images_found_dialog(raw_paths: List[str]):
     except Exception as e:
         logger.error(f"显示错误对话框失败: {e}")
 
-def _get_remaining_images(image_paths: List[str], card_id: Optional[int], click_all_found: bool, context) -> List[str]:
-    """获取待处理的图片列表"""
-    return resolve_multi_image_remaining(image_paths, card_id, click_all_found, context)
-
 def _execute_parallel_recognition(image_paths: List[str], params: Dict[str, Any],
                                 execution_mode: str, target_hwnd: Optional[int],
                                 get_image_data=None, stop_checker=None) -> List[RecognitionResult]:
@@ -205,71 +178,6 @@ def _execute_parallel_recognition(image_paths: List[str], params: Dict[str, Any]
         
     except Exception as e:
         logger.error(f"并行识别失败: {e}")
-        return []
-
-def _execute_serial_recognition(image_paths: List[str], params: Dict[str, Any],
-                               execution_mode: str, target_hwnd: Optional[int],
-                               get_image_data, card_id: Optional[int], stop_checker=None) -> List[RecognitionResult]:
-    """执行串行图片识别（回退方案）
-
-    注意：此函数内部已经执行了点击操作（通过execute_image_click）
-    因此返回的结果中已经完成了点击，不需要再次点击
-    """
-    try:
-        from tasks.image_match_click import execute_task as execute_image_click
-
-        logger.info(f"[串行识别] 开始处理{len(image_paths)}张图片")
-        results = []
-
-        for i, image_path in enumerate(image_paths):
-            if _is_stop_requested(stop_checker):
-                break
-            start_time = time.time()
-
-            # 构建单图参数
-            single_params = _build_single_image_params(params, image_path)
-
-            # 执行识别和点击（execute_image_click内部会完成识别和点击两个操作）
-            success, action, next_id = execute_image_click(
-                single_params,
-                {},
-                execution_mode,
-                target_hwnd,
-                None,
-                card_id,
-                get_image_data=get_image_data,
-                stop_checker=stop_checker,
-            )
-
-            processing_time = time.time() - start_time
-            image_name = _get_image_name(image_path)
-
-            # 创建结果对象
-            # 特别标记：already_clicked=True 表示已经点击过了
-            result = RecognitionResult(
-                image_path=image_path,
-                image_name=image_name,
-                index=i,
-                success=success,
-                confidence=0.8 if success else 0.0,  # 串行模式无法获取精确置信度
-                location=None,  # 串行模式不返回位置信息
-                center_x=-1,  # 使用-1标记已经点击过了（避免重复点击）
-                center_y=-1,
-                error_message=None if success else "识别失败",
-                processing_time=processing_time
-            )
-
-            results.append(result)
-
-            # 如果是单次点击模式且找到了，立即返回
-            if success and not resolve_multi_image_flag(params, 'click_all_found', False):
-                logger.info(f"[串行识别] 找到第一张匹配图片: {image_name}（已点击）")
-                break
-
-        return results
-
-    except Exception as e:
-        logger.error(f"串行识别失败: {e}")
         return []
 
 def _process_recognition_results(recognition_results: List[RecognitionResult], 
@@ -335,31 +243,19 @@ def _execute_clicks_for_results(results: List[RecognitionResult], params: Dict[s
                 click_results.append(True)
                 continue
 
-            # 检查是否已经点击过了（串行识别模式会用-1标记）
-            if result.center_x == -1 and result.center_y == -1:
-                logger.info(f"[点击执行] 跳过已点击: {result.image_name}（串行模式已完成点击）")
-                click_results.append(True)  # 已经点击成功了
+            if result.center_x is None or result.center_y is None:
+                logger.error(f"[点击执行] 识别成功但没有坐标: {result.image_name}")
+                click_results.append(False)
                 continue
 
-            if result.center_x is not None and result.center_y is not None:
-                # 使用识别到的坐标点击（并行识别模式）
-                success = _execute_single_click(
-                    result.center_x,
-                    result.center_y,
-                    params,
-                    execution_mode,
-                    target_hwnd,
-                    stop_checker,
-                )
-            else:
-                # 回退到原始点击方法
-                success = _execute_fallback_click(
-                    result.image_path,
-                    params,
-                    execution_mode,
-                    target_hwnd,
-                    stop_checker,
-                )
+            success = _execute_single_click(
+                result.center_x,
+                result.center_y,
+                params,
+                execution_mode,
+                target_hwnd,
+                stop_checker,
+            )
 
             click_results.append(success)
 
@@ -462,78 +358,6 @@ def _execute_single_click(x: int, y: int, params: Dict[str, Any], execution_mode
         logger.error(f"执行点击失败: ({x}, {y}), 错误: {e}")
         return False
 
-def _execute_fallback_click(image_path: str, params: Dict[str, Any], execution_mode: str, target_hwnd: Optional[int], stop_checker=None) -> bool:
-    """回退点击方法"""
-    try:
-        from tasks.image_match_click import execute_task as execute_image_click
-        
-        single_params = _build_single_image_params(params, image_path)
-        success, _, _ = execute_image_click(
-            single_params,
-            {},
-            execution_mode,
-            target_hwnd,
-            None,
-            None,
-            stop_checker=stop_checker,
-        )
-        return success
-        
-    except Exception as e:
-        logger.error(f"回退点击失败: {image_path}, 错误: {e}")
-        return False
-
-def _build_single_image_params(params: Dict[str, Any], image_path: str) -> Dict[str, Any]:
-    """构建单图参数"""
-    # 支持多图专用参数名
-    use_region = (
-        coerce_bool(params.get('use_recognition_region', False)) or
-        coerce_bool(params.get('multi_use_recognition_region', False))
-    )
-    region_x = params.get('multi_recognition_region_x', params.get('recognition_region_x', 0))
-    region_y = params.get('multi_recognition_region_y', params.get('recognition_region_y', 0))
-    region_w = params.get('multi_recognition_region_width', params.get('recognition_region_width', 0))
-    region_h = params.get('multi_recognition_region_height', params.get('recognition_region_height', 0))
-
-    return {
-        'image_path': image_path,
-        'confidence': params.get('confidence', 0.8),
-        'preprocessing_method': params.get('preprocessing_method', '无'),
-        'enable_click': coerce_bool(params.get('image_enable_click', True)),
-        'button': params.get('button', '左键'),
-        'clicks': params.get('clicks', 1),
-        'interval': params.get('interval', 0.1),
-        'enable_retry': params.get('enable_retry', False),
-        'retry_attempts': params.get('retry_attempts', 3),
-        'retry_interval': params.get('retry_interval', 0.5),
-        # 点击位置模式和偏移参数
-        'image_position_mode': params.get('image_position_mode', '精准坐标'),
-        'image_click_action': params.get('image_click_action', params.get('click_action', '完整点击')),
-        'image_enable_auto_release': params.get('image_enable_auto_release', params.get('enable_auto_release', True)),
-        'image_hold_duration': params.get('image_hold_duration', params.get('hold_duration', 0.05)),
-        'click_action': params.get('image_click_action', params.get('click_action', '完整点击')),
-        'enable_auto_release': params.get('image_enable_auto_release', params.get('enable_auto_release', True)),
-        'hold_duration': params.get('image_hold_duration', params.get('hold_duration', 0.05)),
-        'fixed_offset_x': params.get('image_fixed_offset_x', params.get('fixed_offset_x', 0)),
-        'fixed_offset_y': params.get('image_fixed_offset_y', params.get('fixed_offset_y', 0)),
-        'random_offset_x': params.get('image_random_offset_x', params.get('random_offset_x', 5)),
-        'random_offset_y': params.get('image_random_offset_y', params.get('random_offset_y', 5)),
-        'image_fixed_offset_x': params.get('image_fixed_offset_x', 0),
-        'image_fixed_offset_y': params.get('image_fixed_offset_y', 0),
-        'image_random_offset_x': params.get('image_random_offset_x', 5),
-        'image_random_offset_y': params.get('image_random_offset_y', 5),
-        # 【修复】添加识别区域参数（统一使用单图参数名传递给image_match_click）
-        'use_recognition_region': use_region,
-        'recognition_region_x': region_x,
-        'recognition_region_y': region_y,
-        'recognition_region_width': region_w,
-        'recognition_region_height': region_h,
-        'on_success': '执行下一步',
-        'success_jump_target_id': None,
-        'on_failure': '执行下一步',
-        'failure_jump_target_id': None
-    }
-
 def _update_context_records(results: List[RecognitionResult], click_results: List[bool], 
                           card_id: Optional[int], context, click_all_found: bool):
     """更新上下文记录"""
@@ -557,15 +381,6 @@ def _update_context_records(results: List[RecognitionResult], click_results: Lis
     context.set_card_data(card_id, 'clicked_images', clicked_images)
     context.set_card_data(card_id, 'success_images', success_images)
 
-def _get_image_name(image_path: str) -> str:
-    """获取图片名称"""
-    if image_path.startswith('memory://'):
-        return image_path.replace('memory://', '')
-    else:
-        import os
-        return os.path.basename(image_path)
-
-# 辅助函数（从原模块导入）
 def _handle_success(on_success_action: str, success_jump_id: Optional[int], card_id: Optional[int]) -> Tuple[bool, str, Optional[int]]:
     """处理成功情况"""
     from tasks.mouse_action_task import _handle_success as original_handle_success
@@ -575,14 +390,6 @@ def _handle_failure(on_failure_action: str, failure_jump_id: Optional[int], card
     """处理失败情况"""
     from tasks.mouse_action_task import _handle_failure as original_handle_failure
     return original_handle_failure(on_failure_action, failure_jump_id, card_id)
-
-def _handle_all_completed(image_paths: List[str], card_id: Optional[int], context, 
-                         on_success_action: str, success_jump_id: Optional[int],
-                         on_failure_action: str, failure_jump_id: Optional[int]) -> Tuple[bool, str, Optional[int]]:
-    """处理全部完成情况"""
-    logger.info("[优化多图识别] 所有图片都已处理完成")
-    finish_multi_image_round(context, card_id)
-    return _handle_success(on_success_action, success_jump_id, card_id)
 
 def _handle_all_failed(results: List[RecognitionResult], image_paths: List[str], 
                       click_all_found: bool, card_id: Optional[int], context,

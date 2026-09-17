@@ -107,14 +107,33 @@ def load_files_into_memory(files: Mapping[str, bytes]) -> None:
     clear_player_memory_store()
     for key, data in files.items():
         put_player_memory_file(key, data)
-    # 额外用 basename 索引图片，兼容部分卡片只存文件名
+    # 额外用 basename 和分类前缀索引，兼容卡片/脚本只存文件名或 images/replays/... 路径
     for key, data in list(files.items()):
         norm = _normalize_key(key)
-        if norm.startswith("assets/images/"):
+        if norm.startswith("assets/images/dicts/"):
+            rest = norm[len("assets/images/dicts/") :]
+            put_player_memory_file("dicts/" + rest, data)
+            put_player_memory_file("images/dicts/" + rest, data)
+            put_player_memory_file(norm.rsplit("/", 1)[-1], data)
+        elif norm.startswith("assets/images/"):
             put_player_memory_file("images/" + norm[len("assets/images/") :], data)
             put_player_memory_file(norm.rsplit("/", 1)[-1], data)
         elif norm.startswith("assets/sounds/"):
             put_player_memory_file("sounds/" + norm[len("assets/sounds/") :], data)
+            put_player_memory_file(norm.rsplit("/", 1)[-1], data)
+        elif norm.startswith("assets/replays/"):
+            put_player_memory_file("replays/" + norm[len("assets/replays/") :], data)
+            put_player_memory_file(norm.rsplit("/", 1)[-1], data)
+        elif norm.startswith("assets/yolo/"):
+            put_player_memory_file("yolo/" + norm[len("assets/yolo/") :], data)
+            put_player_memory_file(norm.rsplit("/", 1)[-1], data)
+        elif norm.startswith("assets/models/"):
+            put_player_memory_file("yolo/" + norm[len("assets/models/") :], data)
+            put_player_memory_file("models/" + norm[len("assets/models/") :], data)
+            put_player_memory_file(norm.rsplit("/", 1)[-1], data)
+        elif norm.startswith("assets/components/"):
+            put_player_memory_file("plugins/" + norm[len("assets/components/") :], data)
+            put_player_memory_file("components/" + norm[len("assets/components/") :], data)
             put_player_memory_file(norm.rsplit("/", 1)[-1], data)
         elif norm.startswith("ui_assets/"):
             put_player_memory_file(norm, data)

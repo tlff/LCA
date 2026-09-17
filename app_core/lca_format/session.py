@@ -3,8 +3,9 @@ from __future__ import annotations
 import os
 import tempfile
 import threading
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Mapping, Optional
+from typing import Dict, Iterator, Mapping, Optional
 
 
 _registry: dict[str, "LcaPackageSession"] = {}
@@ -28,11 +29,32 @@ def _clear_resolver_cache() -> None:
         pass
 
 
+_PACKAGE_LOGICAL_ALIASES = (
+    ("images/", "assets/images/"),
+    ("sounds/", "assets/sounds/"),
+    ("yolo/", "assets/yolo/"),
+    ("models/", "assets/yolo/"),
+    ("replays/", "assets/replays/"),
+    ("dicts/", "assets/images/dicts/"),
+    ("plugins/", "assets/components/"),
+)
+
+
 def _normalize_logical_path(logical_path: object) -> str:
     path = str(logical_path or "").strip().replace("\\", "/")
     if path.startswith("memory://"):
         path = path[len("memory://") :]
     return path.lstrip("/")
+
+
+def _package_alias_paths(path: str) -> list[str]:
+    aliases = []
+    for logical, packaged in _PACKAGE_LOGICAL_ALIASES:
+        if path.startswith(logical):
+            aliases.append(packaged + path[len(logical) :])
+        elif path.startswith(packaged):
+            aliases.append(logical + path[len(packaged) :])
+    return aliases
 
 
 class LcaPackageSession:
@@ -51,9 +73,13 @@ class LcaPackageSession:
     def get_bytes(self, logical_path: object) -> Optional[bytes]:
         path = _normalize_logical_path(logical_path)
         data = self._files.get(path)
-        if data is None and path.startswith("images/"):
-            data = self._files.get(f"assets/{path}")
-        return data
+        if data is not None:
+            return data
+        for alias in _package_alias_paths(path):
+            data = self._files.get(alias)
+            if data is not None:
+                return data
+        return None
 
     def snapshot_files(self) -> dict[str, bytes]:
         """返回包内文件快照，供导出等只读收集流程使用。"""
@@ -78,20 +104,22 @@ class LcaPackageSession:
             self._resolved_assets[path] = resolved
             return resolved
 
-    def activate(self, path: object = None) -> "LcaPackageSession":
-        """兼容旧调用；新代码应使用 register(path, session) + activate(path)。"""
-        with _registry_lock:
-            registered_path = next(
-                (key for key, session in _registry.items() if session is self),
-                None,
-            )
-        if registered_path is None:
-            registered_path = _normalize_project_path(
-                path or (Path(self._temp_dir.name) / "anonymous.lca")
-            )
-            register(registered_path, self)
-        activate(registered_path)
-        return self
+    def resource_root(self) -> str:
+        return self._temp_dir.name
+
+    def resource_dirs(self) -> Dict[str, str]:
+        root = self._temp_dir.name
+        dirs = {
+            "images_dir": os.path.join(root, "assets", "images"),
+            "sounds_dir": os.path.join(root, "assets", "sounds"),
+            "dicts_dir": os.path.join(root, "assets", "images", "dicts"),
+            "yolo_dir": os.path.join(root, "assets", "yolo"),
+            "replays_dir": os.path.join(root, "assets", "replays"),
+            "plugins_dir": os.path.join(root, "assets", "components"),
+        }
+        for path in dirs.values():
+            os.makedirs(path, exist_ok=True)
+        return dirs
 
 
 def register(path: object, session: LcaPackageSession) -> LcaPackageSession:
@@ -101,6 +129,40 @@ def register(path: object, session: LcaPackageSession) -> LcaPackageSession:
     with _registry_lock:
         _registry[normalized] = session
     return session
+
+
+def register_temporary(session: LcaPackageSession) -> str:
+    if not isinstance(session, LcaPackageSession):
+        raise TypeError("session 必须是 LcaPackageSession")
+    path = str(Path(session.resource_root()) / "package.lca")
+    register(path, session)
+    return _normalize_project_path(path)
+
+
+@contextmanager
+def active_session_scope(
+    path: object,
+    session: Optional[LcaPackageSession] = None,
+) -> Iterator[None]:
+    previous = get_active_path()
+    target = str(path or "").strip()
+    if not target:
+        raise ValueError("LCA 工程路径不能为空")
+    if session is not None:
+        register(target, session)
+    activate(target)
+    try:
+        yield
+    finally:
+        if previous:
+            with _registry_lock:
+                previous_session = _registry.get(previous)
+            if previous_session is not None:
+                activate(previous)
+            else:
+                deactivate()
+        else:
+            deactivate()
 
 
 def activate(path: object) -> LcaPackageSession:
@@ -154,11 +216,6 @@ def deactivate() -> None:
     with _registry_lock:
         _active_path = None
     _clear_resolver_cache()
-
-
-def get_current_session() -> Optional[LcaPackageSession]:
-    """兼容旧名称；返回当前激活的工程会话。"""
-    return get_active()
 
 
 def _resolve_active_package_asset(logical_path: str) -> Optional[str]:

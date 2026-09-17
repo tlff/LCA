@@ -307,13 +307,6 @@ class ControlCenterRunnerMixin:
 
         if (not self._pending_windows) and (not self._pending_valid_windows):
             self._start_all_in_progress = False
-            gate = getattr(self, "_batch_start_gate_event", None)
-            if gate is not None:
-                try:
-                    gate.set()
-                except Exception:
-                    pass
-                self._batch_start_gate_event = None
             if hasattr(self, "start_all_btn") and self.start_all_btn is not None:
                 self.start_all_btn.setEnabled(True)
                 self.start_all_btn.setText("开始")

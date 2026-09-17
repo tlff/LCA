@@ -87,7 +87,6 @@ _PHRASE_REPLACEMENTS: List[Tuple[str, str]] = [
     (r"failed to apply image region selection:", "应用图片区域选择失败："),
     (r"failed to apply multi-image region selection:", "应用多图区域选择失败："),
     (r"failed to apply color search region selection:", "应用找色区域选择失败："),
-    (r"failed to start yolo realtime preview:", "启动 YOLO 实时预览失败："),
     (r"no window hwnd found; fallback to window title", "未找到窗口句柄，回退到窗口标题"),
     (r"window position verification failed:", "窗口位置校验失败："),
     (r"ocr coordinate conversion failed:", "OCR 坐标转换失败："),

@@ -65,21 +65,52 @@ def _should_save_ocr_context(card_id: Optional[int], params: Optional[Dict[str, 
         return True
 
 
+def _capture_once_for_ocr(hwnd: int, timeout: float = 4.0):
+    from services.screenshot_pool import capture_window
+
+    captured = capture_window(
+        hwnd=int(hwnd),
+        client_area_only=True,
+        use_cache=False,
+        timeout=max(0.1, float(timeout)),
+    )
+    if captured is not None and isinstance(captured, np.ndarray) and captured.size > 0:
+        return captured
+    return None
+
+
+def _reset_ocr_capture_session(hwnd: int) -> None:
+    """游戏重启后旧 WGC/插件捕获会话会失效，丢掉再重建。"""
+    hwnd_value = int(hwnd)
+    try:
+        from services.screenshot_pool import clear_screenshot_cache, cleanup_screenshot_engine_runtime
+
+        clear_screenshot_cache(hwnd_value)
+        cleanup_screenshot_engine_runtime(hwnd=hwnd_value)
+    except Exception as exc:
+        logger.debug("[OCR截图] 清理失效捕获会话失败: hwnd=%s err=%s", hwnd_value, exc)
+    try:
+        from utils.plugin.session import unbind_shared_plugin_windows
+
+        unbind_shared_plugin_windows(hwnd_value)
+    except Exception as exc:
+        logger.debug("[OCR截图] 解除失效插件绑定失败: hwnd=%s err=%s", hwnd_value, exc)
+
+
 def _capture_window_for_ocr(hwnd: int, timeout: float = 4.0):
     """
     OCR截图统一走截图池入口：
     - 同窗口同引擎并发请求共享同一轮抓帧结果
     - 避免多线程同时向底层引擎重复抢帧
+    - 抓帧失败时清掉旧捕获会话再试一次（游戏重启后常见）
     """
     try:
-        from services.screenshot_pool import capture_window
-
-        return capture_window(
-            hwnd=int(hwnd),
-            client_area_only=True,
-            use_cache=False,
-            timeout=max(0.1, float(timeout)),
-        )
+        captured = _capture_once_for_ocr(hwnd, timeout=timeout)
+        if captured is not None:
+            return captured
+        logger.warning("[OCR截图] 首次抓帧失败，重建捕获会话后重试: hwnd=%s", int(hwnd))
+        _reset_ocr_capture_session(hwnd)
+        return _capture_once_for_ocr(hwnd, timeout=timeout)
     except Exception as exc:
         logger.warning(f"[OCR截图] 共享截图入口调用失败: {exc}")
         return None
@@ -1801,23 +1832,4 @@ def test_ocr_output(params: Dict[str, Any], **kwargs) -> bool:
             clear_screenshot_runtime_state(hwnd=target_hwnd if target_hwnd else None)
         except Exception:
             pass
-
-
-if __name__ == '__main__':
-    # 测试代码
-    logging.basicConfig(level=logging.DEBUG)
-    
-    # 测试OCR引擎初始化
-    engine = _get_ocr_engine()
-    if engine:
-        logger.info(f"OCR引擎初始化成功: {engine['engine']}")
-    else:
-        logger.error("OCR引擎初始化失败")
-    
-    # 测试参数定义
-    params_def = get_params_definition()
-    logger.info(f"参数定义包含 {len(params_def)} 个参数")
-
-
-
 

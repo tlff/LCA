@@ -8,7 +8,7 @@ import os
 import time
 from typing import Callable, Optional
 
-from utils.app_paths import get_app_root, get_images_dir, get_sounds_dir
+from utils.app_paths import get_app_root
 
 logger = logging.getLogger(__name__)
 
@@ -16,10 +16,22 @@ _MCI_ALIAS = "lca_media"
 
 
 def resolve_media_path(raw_path: str) -> Optional[str]:
-    text = str(raw_path or "").strip()
+    from task_workflow.resource_path import unwrap_resource_path
+
+    text = unwrap_resource_path(raw_path) or ""
     if not text or text.startswith("memory://"):
         return None
 
+    from task_workflow.script_resources import resolve_resource_path
+
+    located = resolve_resource_path(text, enforce_jail=False)
+    if located and os.path.isfile(located):
+        return located
+
+    from task_workflow.resource_context import current_images_dir, current_sounds_dir
+
+    images_dir = current_images_dir()
+    sounds_dir = current_sounds_dir()
     candidates = []
     if os.path.isabs(text):
         candidates.append(text)
@@ -28,18 +40,27 @@ def resolve_media_path(raw_path: str) -> Optional[str]:
         basename = os.path.basename(normalized)
         candidates.append(os.path.abspath(text))
         candidates.append(os.path.join(get_app_root(), text))
-        if normalized.lower().startswith("sounds/"):
+        lowered = normalized.lower()
+        if lowered.startswith("assets/sounds/"):
+            suffix = normalized[len("assets/sounds/"):].lstrip("/")
+            if suffix:
+                candidates.append(os.path.join(sounds_dir, suffix))
+        if lowered.startswith("sounds/"):
             suffix = normalized[7:].lstrip("/")
             if suffix:
-                candidates.append(os.path.join(get_sounds_dir(), suffix))
+                candidates.append(os.path.join(sounds_dir, suffix))
                 candidates.append(os.path.join(get_app_root(), "sounds", suffix))
-        if normalized.lower().startswith("images/"):
+        if lowered.startswith("assets/images/"):
+            suffix = normalized[len("assets/images/"):].lstrip("/")
+            if suffix:
+                candidates.append(os.path.join(images_dir, suffix))
+        if lowered.startswith("images/"):
             suffix = normalized[7:].lstrip("/")
             if suffix:
-                candidates.append(os.path.join(get_images_dir(), suffix))
+                candidates.append(os.path.join(images_dir, suffix))
         if basename:
-            candidates.append(os.path.join(get_images_dir(), basename))
-            candidates.append(os.path.join(get_sounds_dir(), basename))
+            candidates.append(os.path.join(images_dir, basename))
+            candidates.append(os.path.join(sounds_dir, basename))
             candidates.append(os.path.join(get_app_root(), "sounds", basename))
 
     seen = set()

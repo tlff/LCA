@@ -11,7 +11,7 @@ from typing import Dict, List, Optional, Any, Tuple
 from PySide6.QtCore import QObject, Signal
 
 from task_workflow.workflow_task import WorkflowTask
-from task_workflow.workspace import get_effective_workflow_images_dir
+from task_workflow.workspace import apply_resource_dirs_to_task, resolve_runtime_resource_dirs
 
 logger = logging.getLogger(__name__)
 
@@ -231,7 +231,11 @@ class WorkflowTaskManager(QObject):
             self.next_task_id = task_id + 1
 
         # 创建任务对象
-        task_images_dir = get_effective_workflow_images_dir(workflow_data, self.images_dir)
+        resource_dirs = resolve_runtime_resource_dirs(
+            workflow_data,
+            workflow_filepath=filepath,
+            default_images_dir=self.images_dir,
+        )
 
         task = WorkflowTask(
             task_id=task_id,
@@ -239,10 +243,16 @@ class WorkflowTaskManager(QObject):
             filepath=filepath,
             workflow_data=workflow_data,
             task_modules=self.task_modules,
-            images_dir=task_images_dir,
+            images_dir=str(resource_dirs.get("images_dir") or self.images_dir),
             config=self.config,
-            parent=self
+            parent=self,
+            sounds_dir=str(resource_dirs.get("sounds_dir") or ""),
+            dicts_dir=str(resource_dirs.get("dicts_dir") or ""),
+            yolo_dir=str(resource_dirs.get("yolo_dir") or ""),
+            replays_dir=str(resource_dirs.get("replays_dir") or ""),
+            plugins_dir=str(resource_dirs.get("plugins_dir") or ""),
         )
+        apply_resource_dirs_to_task(task, resource_dirs, self.images_dir)
 
         # 连接任务信号
         task.status_changed.connect(partial(self._on_task_status_changed, task_id))

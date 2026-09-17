@@ -53,39 +53,16 @@ class ControlCenterWorkflowRuntimeMixin:
         self._started_count = 0
         self._start_all_in_progress = True
         self._cancel_start_sequence = False
-        self._batch_start_gate_event = threading.Event() if self._should_use_batch_start_gate() else None
         self._refresh_multi_window_mode_env()
         self._set_start_all_button_state(False, "\u542f\u52a8\u4e2d...")
         self._start_next_window()
-
-    def _should_use_batch_start_gate(self) -> bool:
-        try:
-            configured_delay = self._window_start_delay_sec
-            return (
-                len(self._pending_windows) > 1
-                and configured_delay is not None
-                and float(configured_delay) <= 0
-            )
-        except Exception:
-            return False
 
     def _set_start_all_button_state(self, enabled: bool, text: str):
         if hasattr(self, "start_all_btn") and self.start_all_btn is not None:
             self.start_all_btn.setEnabled(enabled)
             self.start_all_btn.setText(text)
 
-    def _release_batch_start_gate(self):
-        gate = getattr(self, "_batch_start_gate_event", None)
-        if gate is None:
-            return
-        try:
-            gate.set()
-        except Exception:
-            pass
-        self._batch_start_gate_event = None
-
     def _clear_pending_start_state(self, reenable_button: bool):
-        self._release_batch_start_gate()
         self._pending_windows = []
         self._pending_valid_windows = None
         self._start_all_in_progress = False
@@ -149,7 +126,6 @@ class ControlCenterWorkflowRuntimeMixin:
         self._pending_windows = []
         self._start_all_in_progress = False
         self._pending_valid_windows = None
-        self._release_batch_start_gate()
         self._refresh_multi_window_mode_env()
         self._set_start_all_button_state(True, "开始")
         self.log_message(f"\u5df2\u542f\u52a8 {self._started_count} \u4e2a\u7a97\u53e3\u7684\u5de5\u4f5c\u6d41")

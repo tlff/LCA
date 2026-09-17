@@ -103,7 +103,7 @@ class WindowTaskRunnerSlotsMixin:
         self._card_step_labels = labels
 
     def _build_workflow_id(self) -> str:
-        window_part = str(self.window_info.get("hwnd", self.window_id) or self.window_id).strip() or "unknown"
+        window_part = str(getattr(self, "job_id", None) or self.window_id or "").strip() or "unknown"
         slot_part = str(self.workflow_slot)
         workflow_path = str(self.workflow_file_path or "").strip()
         if workflow_path:

@@ -1,7 +1,6 @@
 import os
-import threading
 from collections import deque
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List
 from PySide6.QtWidgets import QMainWindow
 
 from app_core.control_plane import JobScheduler
@@ -20,11 +19,10 @@ from ..control_center_parts.control_center_workflow_runtime_mixin import Control
 from ..control_center_parts.control_center_workflow_assignment_mixin import ControlCenterWorkflowAssignmentMixin
 from ..control_center_parts.control_center_window_task_mixin import ControlCenterWindowTaskMixin
 from ..control_center_parts.control_center_batch_ops_mixin import ControlCenterBatchOpsMixin
-from ..control_center_parts.control_center_stability_test_mixin import ControlCenterStabilityTestMixin
 from utils.window.window_coordinate_common import get_available_geometry_for_widget, clamp_preferred_window_size
 
 
-class ControlCenterWindow(ControlCenterRunnerMixin, ControlCenterTimerMixin, ControlCenterPauseTimerMixin, ControlCenterTimerDialogMixin, ControlCenterUiLayoutMixin, ControlCenterWindowLifecycleMixin, ControlCenterWindowTableMixin, ControlCenterWorkflowRuntimeMixin, ControlCenterWorkflowAssignmentMixin, ControlCenterWindowTaskMixin, ControlCenterBatchOpsMixin, ControlCenterStabilityTestMixin, QMainWindow):
+class ControlCenterWindow(ControlCenterRunnerMixin, ControlCenterTimerMixin, ControlCenterPauseTimerMixin, ControlCenterTimerDialogMixin, ControlCenterUiLayoutMixin, ControlCenterWindowLifecycleMixin, ControlCenterWindowTableMixin, ControlCenterWorkflowRuntimeMixin, ControlCenterWorkflowAssignmentMixin, ControlCenterWindowTaskMixin, ControlCenterBatchOpsMixin, QMainWindow):
     """中控软件主窗口 - 多窗口工作流管理"""
 
     def __init__(self, bound_windows: List[Dict], task_modules: Dict[str, Any], parent=None):
@@ -54,16 +52,14 @@ class ControlCenterWindow(ControlCenterRunnerMixin, ControlCenterTimerMixin, Con
         self._start_all_in_progress = False  # 是否正在批量启动
         self._cancel_start_sequence = False
         self._is_closing = False  # 关闭标记：阻断OCR预创建与延迟启动链路
-        self._batch_start_gate_event: Optional[threading.Event] = None  # 批量启动同步闸门
         self._window_workflow_results = {}  # window_id -> {workflow_index: success_bool}
         self._deferred_global_stop_cleanup_pending = False
         self._runner_start_queue = deque()
         self._runner_dispatch_suspended = False
         self._runner_dispatch_in_progress = False
         self._dead_hwnd_stopped = set()
+        self._dead_hwnd_reasons = {}
         self._hwnd_watchdog_timer = None
-        self._stability_test_active = False
-        self._stability_test_snapshot = None
 
         # 临时工作流配置文件路径
         try:

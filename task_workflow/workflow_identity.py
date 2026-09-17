@@ -16,5 +16,7 @@ def normalize_workflow_filepath(workflow_filepath: Optional[str]) -> Optional[st
     text = str(workflow_filepath or "").strip()
     if not text:
         return None
+    if text.startswith("memory://"):
+        return text
     return os.path.abspath(os.path.normpath(text))
 

@@ -28,21 +28,6 @@ from utils.window.native_detection_overlay import Win32OverlayWindow
 logger = logging.getLogger(__name__)
 
 
-def close_detection_window():
-    """兼容接口，已移除预览功能"""
-    hide_detections_overlay()
-
-
-def stop_realtime_preview():
-    """兼容接口，已移除预览功能"""
-    hide_detections_overlay()
-
-
-def close_all_yolo_windows():
-    """兼容接口，已移除预览功能"""
-    hide_detections_overlay()
-
-
 # 窗口绘制overlay相关
 _overlay_instance = None
 
@@ -74,7 +59,7 @@ _overlay_shutdown_requested = False
 _overlay_dirty = False
 
 
-_overlay_refresh_interval = 0.05  # Lower refresh to reduce overhead, event wakes on updates.
+_overlay_refresh_interval = 0.01  # 目标窗口抢 TOPMOST 时需要更勤地重新置顶。
 
 
 _qt_overlay_manager = None
@@ -242,15 +227,15 @@ def _set_overlay_render_mode(mode_value: Any) -> str:
 
 
 def _get_overlay_hold_last_duration() -> float:
-    return max(_tracking_draw_gap * 2.0, 0.12)
+    return max(float(_tracking_missing_timeout), 1.0)
 
 
 def _get_overlay_empty_grace() -> float:
-    return max(_get_overlay_hold_last_duration(), _tracking_draw_gap * 3.0, 0.18)
+    return _get_overlay_hold_last_duration()
 
 
 def _get_overlay_stale_duration() -> float:
-    return max(_tracking_draw_gap * 5.0, 0.25)
+    return _get_overlay_hold_last_duration()
 
 
 def _normalize_overlay_frame_shape(frame_shape: Any) -> Optional[Tuple[int, ...]]:
@@ -456,7 +441,7 @@ def _is_tracking_state_live(state: Optional[Dict[str, Any]], now_ts: Optional[fl
         return False
     if now_ts is None:
         now_ts = time.perf_counter()
-    max_age = max(_tracking_timeout, _tracking_draw_gap, 0.08)
+    max_age = max(_tracking_timeout, _tracking_draw_gap, _tracking_missing_timeout, 0.08)
     return (now_ts - last_update) <= max_age
 
 
@@ -596,6 +581,34 @@ def _dedupe_boxes(
     return merged
 
 
+def _resolve_native_overlay_frame(
+    hwnd: Any,
+    detections: Optional[List[Any]],
+    frame_shape: Any,
+    last_detections: Optional[List[Any]],
+    last_hwnd: Any,
+    last_frame_shape: Any,
+    last_update_ts: float,
+    now: float,
+    force_clear: bool,
+    tracking_live: bool,
+) -> Tuple[str, List[Any], Any, bool]:
+    """决定本帧叠加层是继续画还是隐藏。
+
+    返回 (action, render_detections, render_frame_shape, held_last)。
+    action 为 "hide" 或 "render"。
+    """
+    if as_hwnd(hwnd) == 0:
+        return "hide", [], None, False
+
+    current = list(detections) if detections else []
+    _ = (last_detections, last_hwnd, last_frame_shape, last_update_ts, now, force_clear, tracking_live)
+
+    if current:
+        return "render", current, frame_shape, False
+    return "hide", [], frame_shape, False
+
+
 def _overlay_drawing_loop():
     """Background draw loop driven by an event with a low-rate fallback tick."""
     global _overlay_instance, _overlay_active, _overlay_detections, _overlay_hwnd, _overlay_frame_shape, _overlay_dirty
@@ -645,75 +658,36 @@ def _overlay_drawing_loop():
                     _overlay_dirty = False
 
                 now = time.perf_counter()
-                stale_duration = _get_overlay_stale_duration()
-                hold_last_duration = _get_overlay_hold_last_duration()
-                empty_grace = _get_overlay_empty_grace()
                 with _overlay_force_clear_lock:
                     force_clear = bool(_overlay_force_clear)
                     if force_clear:
                         _overlay_force_clear = False
+                with _tracking_lock:
+                    tracking_live = _is_tracking_state_live(_tracking_state, now)
 
-                if as_hwnd(hwnd) == 0:
+                action, render_detections, render_frame_shape, held_last = _resolve_native_overlay_frame(
+                    hwnd=hwnd,
+                    detections=detections,
+                    frame_shape=frame_shape,
+                    last_detections=last_detections,
+                    last_hwnd=last_hwnd,
+                    last_frame_shape=last_frame_shape,
+                    last_update_ts=last_update_ts,
+                    now=now,
+                    force_clear=force_clear,
+                    tracking_live=tracking_live,
+                )
+                if held_last:
+                    force_redraw = True
+
+                if action == "hide" or not render_detections:
                     if _overlay_instance is not None:
                         _overlay_instance.hide()
                     with _overlay_lock:
                         _overlay_detections = []
-                        _overlay_hwnd = None
-                        _overlay_frame_shape = None
+                        _overlay_hwnd = None if as_hwnd(hwnd) == 0 else hwnd
+                        _overlay_frame_shape = frame_shape
                         _clear_native_overlay_cache_locked()
-                    continue
-
-                render_detections = detections
-                render_frame_shape = frame_shape
-
-                if render_detections:
-                    if last_update_ts > 0.0 and now - last_update_ts > stale_duration:
-                        if _overlay_instance is not None:
-                            _overlay_instance.hide()
-                        with _overlay_lock:
-                            _overlay_detections = []
-                            _overlay_hwnd = hwnd
-                            _overlay_frame_shape = frame_shape
-                            _clear_native_overlay_cache_locked()
-                        continue
-                else:
-                    if force_clear:
-                        if _overlay_instance is not None:
-                            _overlay_instance.hide()
-                        with _overlay_lock:
-                            _overlay_detections = []
-                            _overlay_frame_shape = frame_shape
-                            _clear_native_overlay_cache_locked()
-                        continue
-                    if int(last_hwnd or 0) != int(hwnd or 0) or not last_detections or last_update_ts <= 0.0:
-                        if _overlay_instance is not None:
-                            _overlay_instance.hide()
-                        with _overlay_lock:
-                            _overlay_detections = []
-                            _overlay_frame_shape = frame_shape
-                            _clear_native_overlay_cache_locked()
-                        continue
-
-                    age = now - last_update_ts
-                    if age > stale_duration or age > empty_grace:
-                        if _overlay_instance is not None:
-                            _overlay_instance.hide()
-                        with _overlay_lock:
-                            _overlay_detections = []
-                            _overlay_frame_shape = frame_shape
-                            _clear_native_overlay_cache_locked()
-                        continue
-
-                    if age <= hold_last_duration:
-                        render_detections = last_detections
-                        render_frame_shape = last_frame_shape or frame_shape
-                        force_redraw = True
-                    else:
-                        continue
-
-                if not render_detections:
-                    if _overlay_instance is not None:
-                        _overlay_instance.hide()
                     continue
 
                 _overlay_instance.render(hwnd, render_detections, render_frame_shape, force_redraw=force_redraw)
@@ -1349,25 +1323,9 @@ def _draw_detections_with_qt(hwnd: int, detections: List, frame_shape: Tuple) ->
             global _overlay_force_clear
             self._apply_render_mode(_get_overlay_render_mode())
             if not dets:
-                force_clear = False
                 with _overlay_force_clear_lock:
-                    if _overlay_force_clear:
-                        force_clear = True
-                        _overlay_force_clear = False
-                if force_clear:
-                    self.hide_overlay()
-                    return
-                now = time.perf_counter()
-                if self.overlay is None or not self._last_dets:
-                    return
-                if now - self._last_update_ts <= self._hold_last_duration:
-                    self.overlay.update_detections(
-                        self._last_dets,
-                        self._last_frame_shape or frame_shape_value,
-                    )
-                    return
-                if now - self._last_update_ts > self._empty_grace:
-                    self.hide_overlay()
+                    _overlay_force_clear = False
+                self.hide_overlay()
                 return
             if self.overlay is None or self.overlay.target_hwnd != target_hwnd:
                 if self.overlay is not None:
@@ -1521,9 +1479,8 @@ def _schedule_native_overlay(hwnd: int, detections: List, frame_shape: Tuple) ->
     now = time.perf_counter()
     thread_to_start = None
 
-    if normalized_detections:
-        with _overlay_force_clear_lock:
-            _overlay_force_clear = False
+    with _overlay_force_clear_lock:
+        _overlay_force_clear = not bool(normalized_detections)
 
     with _overlay_lock:
         if _overlay_thread is None or not _overlay_thread.is_alive():
@@ -1544,7 +1501,7 @@ def _schedule_native_overlay(hwnd: int, detections: List, frame_shape: Tuple) ->
             _overlay_last_hwnd = hwnd
             _overlay_last_frame_shape = normalized_frame_shape
             _overlay_last_update_ts = now
-        elif int(_overlay_last_hwnd or 0) != int(hwnd or 0):
+        else:
             _clear_native_overlay_cache_locked()
 
     if thread_to_start is not None:
@@ -1641,18 +1598,8 @@ def _update_tracking_state(hwnd: int, detections: List, frame_shape: Tuple,
     global _tracking_state, _tracking_active, _tracking_thread
 
     if not detections:
-        if screenshot is None:
-            with _tracking_lock:
-                _tracking_state = None
-        else:
-            with _tracking_lock:
-                if _tracking_state is not None:
-                    _tracking_state["hwnd"] = hwnd
-                    if frame_shape is not None:
-                        _tracking_state["frame_shape"] = frame_shape
-                    if tracking_engine:
-                        _tracking_state["tracking_engine"] = tracking_engine
-                    _tracking_state["executor"] = executor
+        with _tracking_lock:
+            _tracking_state = None
         return
     if screenshot is None:
         with _tracking_lock:
@@ -1804,6 +1751,7 @@ def _update_tracking_state(hwnd: int, detections: List, frame_shape: Tuple,
 
 def _capture_tracking_frame(hwnd: int, engine: Optional[str]) -> Optional[np.ndarray]:
     try:
+        from utils.capture.engine_ids import is_supported_screenshot_engine
         from utils.capture.screenshot_helper import _capture_with_engine, get_screenshot_engine
 
         try:
@@ -1817,7 +1765,7 @@ def _capture_tracking_frame(hwnd: int, engine: Optional[str]) -> Optional[np.nda
             engine = get_screenshot_engine()
 
         engine_name = str(engine or "").strip().lower()
-        if engine_name not in {"dxgi", "gdi", "wgc", "printwindow"}:
+        if not is_supported_screenshot_engine(engine_name):
             return None
 
         return _capture_with_engine(
@@ -2295,6 +2243,19 @@ def draw_detections_on_window(hwnd: int, detections: List, frame_shape: Tuple, e
     _dispatch_overlay_update(hwnd, detections, frame_shape, executor=executor)
 
 
+def _is_gui_thread() -> bool:
+    try:
+        from PySide6.QtCore import QThread
+        from PySide6.QtWidgets import QApplication
+
+        app = QApplication.instance()
+        if app is None:
+            return False
+        return QThread.currentThread() == app.thread()
+    except Exception:
+        return False
+
+
 def hide_detections_overlay(release_runtime: bool = False):
     """Stop overlay drawing and release resources."""
     global _overlay_instance, _overlay_active, _overlay_thread, _overlay_detections, _overlay_hwnd, _overlay_frame_shape, _overlay_dirty
@@ -2369,33 +2330,32 @@ def hide_detections_overlay(release_runtime: bool = False):
                 _qt_overlay_invoker.invoke.emit(_shutdown)
     _qt_overlay_manager = None
 
-    if release_runtime:
+    gui_thread = _is_gui_thread()
+    if release_runtime and not gui_thread:
         if not _shutdown_native_overlay_runtime():
             logger.debug("悬浮层运行时关闭超时")
     else:
-        overlay_ref = None
         with _overlay_lock:
             _overlay_active = False
-            _overlay_shutdown_requested = False
+            if release_runtime:
+                _overlay_shutdown_requested = True
             _clear_overlay_runtime_state_locked()
-            overlay_ref = _overlay_instance
 
         with _overlay_force_clear_lock:
-            _overlay_force_clear = False
+            _overlay_force_clear = True
         _overlay_event.set()
-
-        if overlay_ref is not None:
-            try:
-                overlay_ref.hide()
-            except Exception:
-                pass
 
     _tracking_active = False
     with _tracking_lock:
         _tracking_state = None
-    if _tracking_thread is not None and _tracking_thread.is_alive():
-        _tracking_thread.join(timeout=1)
-    _tracking_thread = None
+    if (
+        not gui_thread
+        and _tracking_thread is not None
+        and _tracking_thread.is_alive()
+    ):
+        _tracking_thread.join(timeout=0.2)
+    if not gui_thread:
+        _tracking_thread = None
 
     invoker_ref = _qt_overlay_invoker
     if invoker_ref is not None:

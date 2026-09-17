@@ -15,10 +15,32 @@ def _normalize_name(name: str) -> str:
     return str(name or "").replace("\\", "/").lstrip("/")
 
 
+_RUNTIME_ALIAS_PREFIXES = (
+    "images/",
+    "sounds/",
+    "replays/",
+    "dicts/",
+    "models/",
+    "yolo/",
+    "components/",
+    "plugins/",
+)
+_BASENAME_SOURCE_PREFIXES = (
+    "assets/images/",
+    "assets/sounds/",
+    "assets/replays/",
+    "assets/images/dicts/",
+    "assets/models/",
+    "assets/yolo/",
+    "assets/components/",
+    "ui_assets/",
+)
+
+
 def package_content_files(files: Mapping[str, bytes]) -> Dict[str, bytes]:
     """只保留包内原始路径，去掉 load_files_into_memory 注入的运行时别名。
 
-    别名包括 ``images/...`` 以及图片/UI 资源的 basename 索引；若参与哈希会误报篡改。
+    别名包括分类前缀（images/sounds/replays/dicts/models）以及 basename 索引；若参与哈希会误报篡改。
     """
     normalized: Dict[str, bytes] = {
         _normalize_name(name): (data if isinstance(data, (bytes, bytearray)) else bytes(data))
@@ -27,13 +49,13 @@ def package_content_files(files: Mapping[str, bytes]) -> Dict[str, bytes]:
     }
     basename_aliases: set[str] = set()
     for name in normalized:
-        if name.startswith("assets/images/") or name.startswith("ui_assets/"):
+        if any(name.startswith(prefix) for prefix in _BASENAME_SOURCE_PREFIXES):
             base = name.rsplit("/", 1)[-1]
             if base:
                 basename_aliases.add(base)
     kept: Dict[str, bytes] = {}
     for name, data in normalized.items():
-        if name.startswith("images/"):
+        if any(name.startswith(prefix) for prefix in _RUNTIME_ALIAS_PREFIXES):
             continue
         if "/" not in name and name not in {"manifest.json", "ui.json", "icon.ico"} and name in basename_aliases:
             continue

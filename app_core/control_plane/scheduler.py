@@ -305,6 +305,8 @@ class JobScheduler:
             JobState.PAUSED,
         }:
             return job.snapshot()
+        if job.state == JobState.FAILED and aggregated == JobState.STOPPED:
+            return job.snapshot()
         keep_step = job.state == aggregated and not str(step or "").strip()
         self._apply_state(job, aggregated, step=step, keep_step=keep_step)
         return job.snapshot()

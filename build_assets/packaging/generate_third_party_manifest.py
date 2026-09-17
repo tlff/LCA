@@ -64,6 +64,8 @@ def read_direct_runtime_requirements() -> dict[str, str]:
     """requirements-runtime.txt 里显式钉死的直接依赖：规范化名 -> 版本。"""
     pinned: dict[str, str] = {}
     requirements = PROJECT_ROOT / "requirements-runtime.txt"
+    if not requirements.is_file():
+        raise FileNotFoundError(f"缺少运行时依赖清单: {requirements}")
     for raw_line in requirements.read_text(encoding="utf-8-sig").splitlines():
         line = raw_line.split("#", 1)[0].strip()
         if not line or line.startswith("-"):
@@ -132,6 +134,14 @@ _DIST_TO_IMPORT_NAMES = {
     "pyside6-essentials": ("PySide6",),
     "pyautogui": ("pyautogui",),
     "mouseinfo": ("mouseinfo",),
+    "pyscreeze": ("pyscreeze",),
+    "pymsgbox": ("pymsgbox",),
+    "pygetwindow": ("pygetwindow",),
+    "pytweening": ("pytweening",),
+    "pyrect": ("pyrect",),
+    "coloredlogs": ("coloredlogs",),
+    "humanfriendly": ("humanfriendly",),
+    "pyreadline3": ("pyreadline3",),
     "protobuf": ("google.protobuf",),
     "pywin32": ("win32api", "win32gui", "win32con", "pywintypes"),
     "typing-extensions": ("typing_extensions",),

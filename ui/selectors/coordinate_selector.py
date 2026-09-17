@@ -8,8 +8,9 @@
 import logging
 from typing import Optional, Tuple, List
 from PySide6.QtWidgets import QWidget, QPushButton, QVBoxLayout, QMessageBox
-from PySide6.QtCore import Signal, QPoint, QRect, Qt, QTimer
-from PySide6.QtGui import QPainter, QPen, QColor, QBrush
+from PySide6.QtCore import Signal, QPoint, QPointF, QRect, Qt, QTimer
+from PySide6.QtGui import QBrush, QColor, QPainter, QPainterPath, QPen
+from themes import theme_color
 
 from utils.window.window_finder import resolve_unique_window_hwnd
 from utils.window.window_coordinate_common import (
@@ -21,6 +22,7 @@ from utils.window.window_coordinate_common import (
 )
 from utils.window.window_overlay_utils import (
     apply_overlay_text_style,
+    overlay_hint_font,
     capture_virtual_desktop_pixmap,
     capture_window_client_pixmap,
     configure_opaque_picker_overlay,
@@ -42,12 +44,55 @@ from utils.window.window_activation_utils import (
 )
 from .multi_coordinate_text import (
     MULTI_COORDINATE_BUTTON_TEXT,
+    MULTI_COORDINATE_DRAWING_HINT,
     MULTI_COORDINATE_EMPTY_HINT_LINES,
     MULTI_COORDINATE_SELECTED_HINT_LINES,
     format_multi_coordinate_selected_text,
+    overlay_point_distance_sq,
+    should_finish_route_on_release,
+    should_sample_route_point,
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _picker_qcolor(key: str, default: str, alpha: int = 255) -> QColor:
+    color = QColor(theme_color(key, default))
+    color.setAlpha(max(0, min(255, int(alpha))))
+    return color
+
+
+def build_smooth_route_path(points) -> QPainterPath:
+    path = QPainterPath()
+    cleaned = []
+    for point in points or ():
+        if point is None:
+            continue
+        cleaned.append(QPointF(float(point.x()), float(point.y())))
+    if not cleaned:
+        return path
+    path.moveTo(cleaned[0])
+    if len(cleaned) == 1:
+        return path
+    if len(cleaned) == 2:
+        path.lineTo(cleaned[1])
+        return path
+    padded = [cleaned[0], *cleaned, cleaned[-1]]
+    for index in range(1, len(padded) - 2):
+        previous = padded[index - 1]
+        current = padded[index]
+        nxt = padded[index + 1]
+        following = padded[index + 2]
+        control_out = QPointF(
+            current.x() + (nxt.x() - previous.x()) / 6.0,
+            current.y() + (nxt.y() - previous.y()) / 6.0,
+        )
+        control_in = QPointF(
+            nxt.x() - (following.x() - current.x()) / 6.0,
+            nxt.y() - (following.y() - current.y()) / 6.0,
+        )
+        path.cubicTo(control_out, control_in, nxt)
+    return path
 
 try:
     import win32gui
@@ -438,12 +483,8 @@ class OffsetSelectorOverlay(CoordinateSelectorOverlay):
 
     def mouseMoveEvent(self, event):
         if self.dragging:
-            old_end = QPoint(self.drag_end) if self.drag_end else event.pos()
             self.drag_end = event.pos()
-            start = self.drag_start or old_end
-            dirty = QRect(start, old_end).normalized().united(QRect(start, self.drag_end).normalized())
-            dirty.adjust(-80, -40, 80, 40)
-            self.update(dirty.intersected(self.rect()))
+            self.update()
 
     def mouseReleaseEvent(self, event):
         if self.dragging and event.button() == Qt.MouseButton.LeftButton:
@@ -461,6 +502,7 @@ class OffsetSelectorOverlay(CoordinateSelectorOverlay):
                 )
                 self.offset_selected.emit(dx, dy)
 
+            self.update()
             QTimer.singleShot(300, self._close_after_preview)
 
     def paintEvent(self, event):
@@ -1010,6 +1052,9 @@ class MultiPointCoordinateSelectorOverlay(QWidget):
         self.click_positions = []  # 屏幕坐标位置，用于绘制
         self.click_timestamps = []
         self.selection_start_time = None
+        self._drawing = False
+        self._stroke_moved = False
+        self._hover_pos = None
 
         # 窗口激活状态标志
         self._is_ready_for_input = False
@@ -1209,6 +1254,36 @@ class MultiPointCoordinateSelectorOverlay(QWidget):
         self.update()
         return True
 
+    def _paint_route_marker(self, painter: QPainter, center: QPoint, label: str) -> None:
+        accent = _picker_qcolor("accent", "#0078d4")
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QBrush(accent))
+        painter.drawEllipse(center, 3, 3)
+        painter.setPen(QPen(accent))
+        painter.setFont(overlay_hint_font())
+        painter.drawText(center + QPoint(8, 4), label)
+
+    def _paint_route(self, painter: QPainter, points) -> None:
+        if not points:
+            return
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        path = build_smooth_route_path(points)
+        if len(points) > 1:
+            stroke = QPen(_picker_qcolor("accent", "#0078d4"), 2)
+            stroke.setCapStyle(Qt.PenCapStyle.RoundCap)
+            stroke.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+            painter.setPen(stroke)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawPath(path)
+
+        if len(points) == 1:
+            self._paint_route_marker(painter, points[0], "目标")
+        else:
+            self._paint_route_marker(painter, points[0], "起点")
+            self._paint_route_marker(painter, points[-1], "终点")
+        painter.restore()
+
     def paintEvent(self, event):
         """Paint overlay."""
         painter = QPainter(self)
@@ -1228,38 +1303,20 @@ class MultiPointCoordinateSelectorOverlay(QWidget):
                 painter,
                 target_rect,
                 title=f"目标窗口: {self.target_window_title}",
-                subtitle_lines=["左键添加路线点"],
+                subtitle_lines=["按住左键划线，松开完成"],
             )
 
-        if len(self.click_positions) > 1:
-            pen = QPen(QColor(255, 0, 0), 3)
-            painter.setPen(pen)
-            for i in range(len(self.click_positions) - 1):
-                painter.drawLine(self.click_positions[i], self.click_positions[i + 1])
-
-        if self.click_positions:
-            if len(self.click_positions) == 1:
-                painter.setBrush(QColor(255, 80, 80, 180))
-                apply_overlay_text_style(painter)
-                painter.drawEllipse(self.click_positions[0], 8, 8)
-                painter.drawText(self.click_positions[0] + QPoint(15, 5), "目标")
-            else:
-                painter.setBrush(QColor(0, 255, 0, 180))
-                apply_overlay_text_style(painter)
-                painter.drawEllipse(self.click_positions[0], 8, 8)
-                painter.drawText(self.click_positions[0] + QPoint(15, 5), "起点")
-
-                painter.setBrush(QColor(255, 0, 0, 180))
-                painter.drawEllipse(self.click_positions[-1], 8, 8)
-                painter.drawText(self.click_positions[-1] + QPoint(15, 5), "终点")
-
-            for i in range(1, max(0, len(self.click_positions) - 1)):
-                painter.setBrush(QColor(255, 255, 0, 120))
-                painter.setPen(Qt.PenStyle.NoPen)
-                painter.drawEllipse(self.click_positions[i], 4, 4)
+        route_points = list(self.click_positions)
+        if self._drawing and self._hover_pos is not None:
+            if not route_points or overlay_point_distance_sq(route_points[-1], self._hover_pos) > 0:
+                route_points.append(self._hover_pos)
+        self._paint_route(painter, route_points)
 
         apply_overlay_text_style(painter)
-        if len(self.coordinate_points) > 0:
+        if self._drawing and self.coordinate_points:
+            painter.drawText(20, 30, format_multi_coordinate_selected_text(len(self.coordinate_points)))
+            painter.drawText(20, 50, MULTI_COORDINATE_DRAWING_HINT)
+        elif self.coordinate_points:
             painter.drawText(20, 30, format_multi_coordinate_selected_text(len(self.coordinate_points)))
             painter.drawText(20, 50, MULTI_COORDINATE_SELECTED_HINT_LINES[0])
             painter.drawText(20, 70, MULTI_COORDINATE_SELECTED_HINT_LINES[1])
@@ -1287,28 +1344,53 @@ class MultiPointCoordinateSelectorOverlay(QWidget):
     def mousePressEvent(self, event):
         """鼠标按下事件。"""
         if event.button() == Qt.MouseButton.LeftButton:
+            self._drawing = True
+            self._stroke_moved = False
+            self._hover_pos = event.pos()
             self._append_route_point(event.pos())
         elif event.button() == Qt.MouseButton.RightButton:
             if not self._remove_last_route_point():
                 logger.info("当前没有可撤销的路线点")
 
     def mouseMoveEvent(self, event):
-        """鼠标移动事件。"""
-        _ = event
+        if not self._drawing:
+            return
+        pos = event.pos()
+        self._hover_pos = pos
+        last = self.click_positions[-1] if self.click_positions else None
+        if last is not None and overlay_point_distance_sq(last, pos) > 0:
+            self._stroke_moved = True
+        if should_sample_route_point(last, pos):
+            self._append_route_point(pos)
+        else:
+            self.update()
 
     def mouseReleaseEvent(self, event):
-        """鼠标释放事件。"""
-        _ = event
+        if event.button() != Qt.MouseButton.LeftButton:
+            return
+        self._drawing = False
+        self._hover_pos = None
+        if should_finish_route_on_release(
+            point_count=len(self.coordinate_points),
+            stroke_moved=self._stroke_moved,
+        ):
+            self._finish_selection()
+            return
+        self.update()
+
+    def mouseDoubleClickEvent(self, event):
+        if event.button() != Qt.MouseButton.LeftButton:
+            return
+        if self.coordinate_points:
+            self._finish_selection()
 
     def keyPressEvent(self, event):
         """键盘事件"""
-        if event.key() == Qt.Key.Key_Escape:
-            # ESC键完成选择
-            logger.info(f"ESC键完成选择，共选择了 {len(self.coordinate_points)} 个坐标点")
+        if event.key() in (Qt.Key.Key_Escape, Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            logger.info(f"完成路径选择，共 {len(self.coordinate_points)} 个坐标点")
             self._finish_selection()
 
         elif event.key() == Qt.Key.Key_Z and event.modifiers() == Qt.KeyboardModifier.ControlModifier:
-            # Ctrl+Z 撤销上一个点
             if not self._remove_last_route_point():
                 logger.info("当前没有可撤销的路线点")
 

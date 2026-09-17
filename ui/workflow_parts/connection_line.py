@@ -18,6 +18,9 @@ _DASH_PATTERN = (12.0, 8.0)
 _DASH_UNITS_PER_SECOND = 20.0
 _ANIMATION_INTERVAL_MS = 16
 _OVERVIEW_ZOOM_THRESHOLD = 0.45
+_CORNER_FILLET = 8.0
+_CORNER_FILLET_MIN_SEGMENT = _CORNER_FILLET * 2.0
+_POINT_EPS = 1e-9
 
 _animation_timer = None
 _animated_lines = weakref.WeakSet()
@@ -224,6 +227,54 @@ if TYPE_CHECKING:
     from ..workflow_parts.task_card import TaskCard
 
 
+def _point_toward(origin: tuple[float, float], target: tuple[float, float], distance: float) -> tuple[float, float]:
+    ox, oy = origin
+    tx, ty = target
+    if abs(oy - ty) < _POINT_EPS:
+        direction = 1.0 if tx > ox else -1.0
+        return (ox + direction * distance, oy)
+    if abs(ox - tx) < _POINT_EPS:
+        direction = 1.0 if ty > oy else -1.0
+        return (ox, oy + direction * distance)
+    raise ValueError("连线路径必须是水平或垂直折线")
+
+
+def painter_path_from_points(points: list) -> QPainterPath:
+    """把正交折线转成绘制路径；足够长的拐角用 8px 二次贝塞尔倒圆。"""
+    if not isinstance(points, list) or len(points) < 2:
+        raise ValueError("连线路径点不足")
+    converted: list[tuple[float, float]] = []
+    for raw in points:
+        if not isinstance(raw, (tuple, list)) or len(raw) != 2:
+            raise TypeError("连线路径点必须是 (x, y)")
+        x = float(raw[0])
+        y = float(raw[1])
+        if not math.isfinite(x) or not math.isfinite(y):
+            raise ValueError("连线路径点必须是有限数字")
+        if converted and abs(converted[-1][0] - x) < _POINT_EPS and abs(converted[-1][1] - y) < _POINT_EPS:
+            continue
+        converted.append((x, y))
+    if len(converted) < 2:
+        raise ValueError("连线路径点不足")
+    path = QPainterPath(QPointF(converted[0][0], converted[0][1]))
+    last_index = len(converted) - 1
+    for index in range(1, last_index):
+        prev = converted[index - 1]
+        curr = converted[index]
+        nxt = converted[index + 1]
+        first_len = math.hypot(curr[0] - prev[0], curr[1] - prev[1])
+        second_len = math.hypot(nxt[0] - curr[0], nxt[1] - curr[1])
+        if first_len >= _CORNER_FILLET_MIN_SEGMENT and second_len >= _CORNER_FILLET_MIN_SEGMENT:
+            start_fillet = _point_toward(curr, prev, _CORNER_FILLET)
+            end_fillet = _point_toward(curr, nxt, _CORNER_FILLET)
+            path.lineTo(QPointF(start_fillet[0], start_fillet[1]))
+            path.quadTo(QPointF(curr[0], curr[1]), QPointF(end_fillet[0], end_fillet[1]))
+        else:
+            path.lineTo(QPointF(curr[0], curr[1]))
+    path.lineTo(QPointF(converted[-1][0], converted[-1][1]))
+    return path
+
+
 class ConnectionType(Enum):
     SUCCESS = "success"
     FAILURE = "failure"
@@ -259,7 +310,7 @@ class ConnectionLine(QGraphicsPathItem):
         self.setZValue(5)
         self.setCacheMode(QGraphicsPathItem.CacheMode.NoCache)
         self.setAcceptHoverEvents(True)
-        self.update_path()
+        self._route_points: list[tuple[float, float]] = []
 
     @staticmethod
     def _color_for_line_type(line_type: str) -> QColor:
@@ -301,7 +352,36 @@ class ConnectionLine(QGraphicsPathItem):
         self._shape_cache_dirty = True
 
     def clear_path(self) -> None:
+        self._route_points = []
         self._set_path(QPainterPath())
+
+    def route_points(self) -> list[tuple[float, float]]:
+        return list(self._route_points)
+
+    def apply_route_points(self, points: list) -> bool:
+        if not isinstance(points, list) or len(points) < 2:
+            raise ValueError("连线路由点不足")
+        scene_points: list[tuple[float, float]] = []
+        for raw in points:
+            if not isinstance(raw, (tuple, list)) or len(raw) != 2:
+                raise TypeError("连线路由点必须是 (x, y)")
+            x = float(raw[0])
+            y = float(raw[1])
+            if not math.isfinite(x) or not math.isfinite(y):
+                raise ValueError("连线路由点必须是有限数字")
+            scene_points.append((x, y))
+        if len(self._route_points) == len(scene_points) and all(
+            abs(old[0] - new[0]) < _POINT_EPS and abs(old[1] - new[1]) < _POINT_EPS
+            for old, new in zip(self._route_points, scene_points)
+        ):
+            return False
+        origin = scene_points[0]
+        local_points = [(x - origin[0], y - origin[1]) for x, y in scene_points]
+        self._route_points = scene_points
+        self.setPos(QPointF(origin[0], origin[1]))
+        self._set_path(painter_path_from_points(local_points))
+        self.update()
+        return True
 
     def update_path(self) -> None:
         if self.start_item is None or self.end_item is None:
@@ -315,21 +395,14 @@ class ConnectionLine(QGraphicsPathItem):
             return
         if self.start_item.scene() is not self.end_item.scene():
             raise RuntimeError("连线两端不在同一场景")
-
-        start_pos = self.get_start_pos()
-        end_pos = self.get_end_pos()
-        anchor_pos = QPointF(start_pos)
-        local_end = end_pos - anchor_pos
-        path = QPainterPath(QPointF(0.0, 0.0))
-        control_x = local_end.x() * 0.5
-        path.cubicTo(
-            QPointF(control_x, 0.0),
-            QPointF(control_x, local_end.y()),
-            local_end,
-        )
-        self.setPos(anchor_pos)
-        self._set_path(path)
-        self.update()
+        view = getattr(self.start_item, "view", None)
+        if view is None or not callable(getattr(view, "reroute_connections", None)):
+            raise RuntimeError("连线起点未绑定可路由的工作流视图")
+        if getattr(view, "_loading_workflow", False):
+            return
+        if getattr(view, "_rerouting_connections", False):
+            return
+        view.reroute_connections()
 
     def paint(self, painter, option, widget=None):
         path = self.path()

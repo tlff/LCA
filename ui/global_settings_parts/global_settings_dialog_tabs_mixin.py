@@ -172,7 +172,6 @@ class GlobalSettingsDialogTabsMixin:
         from utils.plugin.bind_modes import (
             PLUGIN_BIND_KIND_BASIC,
             PLUGIN_BIND_KINDS,
-            infer_plugin_bind_kind,
             normalize_plugin_bind_kind,
             plugin_bind_kind_label,
         )
@@ -193,17 +192,9 @@ class GlobalSettingsDialogTabsMixin:
             row.addWidget(field, 1)
             return wrap
 
-        try:
-            configured_kind = normalize_plugin_bind_kind(
-                self.current_config.get("plugin_bind_kind", PLUGIN_BIND_KIND_BASIC)
-            )
-        except ValueError:
-            configured_kind = infer_plugin_bind_kind(
-                display=self.current_config.get("plugin_input_display", "normal"),
-                mouse=self.current_config.get("plugin_mouse", "normal"),
-                keypad=self.current_config.get("plugin_keypad", "normal"),
-                bind_mode=self.current_config.get("plugin_bind_mode", 0),
-            )
+        configured_kind = normalize_plugin_bind_kind(
+            self.current_config.get("plugin_bind_kind", PLUGIN_BIND_KIND_BASIC)
+        )
 
         self.runtime_group = QGroupBox("执行模式")
         self.runtime_group.setObjectName("runtime_group")
@@ -222,10 +213,7 @@ class GlobalSettingsDialogTabsMixin:
         initial_engine = canonicalize_screenshot_engine(
             self.current_config.get("screenshot_engine") or "wgc"
         )
-        if configured_backend == "plugin" or is_plugin_screenshot_engine(initial_engine):
-            initial_backend = "plugin"
-        else:
-            initial_backend = "native"
+        initial_backend = "plugin" if configured_backend == "plugin" else "native"
         backend_index = self.runtime_backend_combo.findData(initial_backend)
         if backend_index >= 0:
             self.runtime_backend_combo.setCurrentIndex(backend_index)
@@ -407,6 +395,54 @@ class GlobalSettingsDialogTabsMixin:
         plugin_panel_layout.setContentsMargins(0, 0, 0, 0)
         plugin_panel_layout.setSpacing(10)
 
+        color_group = QGroupBox("图色")
+        color_layout = QVBoxLayout(color_group)
+        color_layout.setSpacing(8)
+        color_layout.setContentsMargins(12, 8, 12, 8)
+
+        self.plugin_screenshot_engine_combo = QComboBox(self)
+        self.plugin_screenshot_engine_combo.setObjectName("plugin_screenshot_engine_combo")
+        self._style_settings_combo(self.plugin_screenshot_engine_combo)
+        self.plugin_screenshot_engine_combo.setMaxVisibleItems(16)
+        self.plugin_screenshot_engine_combo.setToolTip(
+            "大漠 BindWindow(Ex) 图色。基础为缩写，高级为 BindWindowEx 明细。"
+        )
+        self.plugin_screenshot_panel = _labeled_field(
+            "截图引擎:", self.plugin_screenshot_engine_combo
+        )
+        self.plugin_screenshot_panel.setObjectName("plugin_screenshot_panel")
+
+        self.plugin_input_display_combo = QComboBox(self)
+        self.plugin_input_display_combo.setObjectName("plugin_input_display_combo")
+        self._style_settings_combo(self.plugin_input_display_combo)
+        self.plugin_input_display_combo.setMaxVisibleItems(16)
+        self.plugin_input_display_combo.setToolTip(
+            "跟随截图开启时与截图引擎相同且不可改；关闭跟随后可单独选择。"
+        )
+        self.plugin_input_display_row = _labeled_field("绑定图显:", self.plugin_input_display_combo)
+        self.plugin_input_display_row.setObjectName("plugin_input_display_row")
+
+        color_grid = QGridLayout()
+        color_grid.setContentsMargins(0, 0, 0, 0)
+        color_grid.setHorizontalSpacing(12)
+        color_grid.setVerticalSpacing(8)
+        color_grid.setColumnStretch(0, 1)
+        color_grid.setColumnStretch(1, 1)
+        color_grid.addWidget(self.plugin_screenshot_panel, 0, 0)
+        color_grid.addWidget(self.plugin_input_display_row, 0, 1)
+        color_layout.addLayout(color_grid)
+
+        self.plugin_input_display_follow_check = QCheckBox("绑定图显跟随截图", self)
+        self.plugin_input_display_follow_check.setObjectName("plugin_input_display_follow_check")
+        self.plugin_input_display_follow_check.setChecked(
+            bool(self.current_config.get("plugin_input_display_follow", True))
+        )
+        self.plugin_input_display_follow_check.setToolTip(
+            "开启后绑定图显自动对齐当前插件截图引擎。"
+        )
+        color_layout.addWidget(self.plugin_input_display_follow_check)
+        plugin_panel_layout.addWidget(color_group)
+
         input_group = QGroupBox("键鼠")
         input_layout = QVBoxLayout(input_group)
         input_layout.setSpacing(8)
@@ -423,62 +459,49 @@ class GlobalSettingsDialogTabsMixin:
         self.plugin_mouse_combo = QComboBox(self)
         self.plugin_mouse_combo.setObjectName("plugin_mouse_combo")
         self._style_settings_combo(self.plugin_mouse_combo)
-        self.plugin_mouse_combo.setMaxVisibleItems(16)
+        self.plugin_mouse_combo.setMaxVisibleItems(20)
         plugin_input_grid.addWidget(_labeled_field("鼠标模式:", self.plugin_mouse_combo), 0, 0)
 
         self.plugin_keypad_combo = QComboBox(self)
         self.plugin_keypad_combo.setObjectName("plugin_keypad_combo")
         self._style_settings_combo(self.plugin_keypad_combo)
-        self.plugin_keypad_combo.setMaxVisibleItems(12)
+        self.plugin_keypad_combo.setMaxVisibleItems(16)
         plugin_input_grid.addWidget(_labeled_field("键盘模式:", self.plugin_keypad_combo), 0, 1)
-
-        self.plugin_input_display_combo = QComboBox(self)
-        self.plugin_input_display_combo.setObjectName("plugin_input_display_combo")
-        self._style_settings_combo(self.plugin_input_display_combo)
-        self.plugin_input_display_combo.setMaxVisibleItems(14)
-        self.plugin_input_display_combo.setToolTip(
-            "跟随截图开启时显示当前对齐值且不可改；关闭跟随后可手动选择。"
-        )
-        self.plugin_input_display_row = _labeled_field("绑定图显:", self.plugin_input_display_combo)
-        self.plugin_input_display_row.setObjectName("plugin_input_display_row")
-        plugin_input_grid.addWidget(self.plugin_input_display_row, 1, 0)
 
         self.plugin_bind_mode_combo = QComboBox(self)
         self.plugin_bind_mode_combo.setObjectName("plugin_bind_mode_combo")
         self.plugin_bind_mode_combo.setEditable(False)
         self._style_settings_combo(self.plugin_bind_mode_combo)
-        self.plugin_bind_mode_combo.setMaxVisibleItems(14)
+        self.plugin_bind_mode_combo.setMaxVisibleItems(16)
         self.plugin_bind_mode_combo.setToolTip(
-            "大漠绑定 mode。基础绑定用 0/2（及兼容扩展）；\n"
-            "高级绑定用 101/103 超级绑定。"
+            "大漠绑定 mode。基础绑定为 0–7；\n"
+            "高级绑定为 11/13（驱动）和 101/103（超级绑定）。"
         )
+        from ui.widgets.plugin_public_dropdown import PluginPublicDropdown
+
+        self.plugin_public_dropdown = PluginPublicDropdown(self)
+        self._style_settings_combo(self.plugin_public_dropdown)
+        self.plugin_public_dropdown.set_selected(self.current_config.get("plugin_public"))
+        self.plugin_public_row = _labeled_field("公共属性:", self.plugin_public_dropdown)
+        self.plugin_public_row.setObjectName("plugin_public_row")
+        plugin_input_grid.addWidget(self.plugin_public_row, 1, 0)
+
         self.plugin_advanced_panel = _labeled_field("绑定模式:", self.plugin_bind_mode_combo)
         self.plugin_advanced_panel.setObjectName("plugin_advanced_panel")
         plugin_input_grid.addWidget(self.plugin_advanced_panel, 1, 1)
-
-        self.plugin_input_display_follow_check = QCheckBox("绑定图显跟随截图", self)
-        self.plugin_input_display_follow_check.setObjectName("plugin_input_display_follow_check")
-        self.plugin_input_display_follow_check.setChecked(
-            bool(self.current_config.get("plugin_input_display_follow", True))
-        )
-        self.plugin_input_display_follow_check.setToolTip(
-            "开启后绑定图显自动对齐当前插件截图引擎（下方只读同步）。"
-        )
 
         self.plugin_text_ime_check = QCheckBox("文本走输入法通道", self)
         self.plugin_text_ime_check.setObjectName("plugin_text_ime_check")
         self.plugin_text_ime_check.setChecked(bool(self.current_config.get("plugin_text_ime", False)))
         self.plugin_text_ime_check.setToolTip(
-            "非 ASCII 文本优先用大漠 SendStringIme 输入，绑定时附带 dx.public.input.ime；\n"
-            "游戏类窗口通常只认这条路。需要大漠付费功能。"
+            "非 ASCII 文本用大漠 SendStringIme，绑定时附带 dx.public.input.ime。需要大漠付费功能。"
         )
 
         self.plugin_fake_active_check = QCheckBox("后台假激活", self)
         self.plugin_fake_active_check.setObjectName("plugin_fake_active_check")
         self.plugin_fake_active_check.setChecked(bool(self.current_config.get("plugin_fake_active", False)))
         self.plugin_fake_active_check.setToolTip(
-            "绑定成功后调用 EnableFakeActive(1)，让窗口在非激活状态下也接受键鼠；\n"
-            "部分对消息校验严格的窗口需要开启，可能让前台操作影响后台，默认关闭。"
+            "绑定成功后调用 EnableFakeActive(1)，让窗口在非激活状态下也接受键鼠。"
         )
 
         plugin_option_row = QWidget(self)
@@ -486,7 +509,6 @@ class GlobalSettingsDialogTabsMixin:
         plugin_option_layout = QHBoxLayout(plugin_option_row)
         plugin_option_layout.setContentsMargins(0, 0, 0, 0)
         plugin_option_layout.setSpacing(16)
-        plugin_option_layout.addWidget(self.plugin_input_display_follow_check)
         plugin_option_layout.addWidget(self.plugin_text_ime_check)
         plugin_option_layout.addWidget(self.plugin_fake_active_check)
         plugin_option_layout.addStretch(1)
@@ -494,35 +516,6 @@ class GlobalSettingsDialogTabsMixin:
 
         input_layout.addWidget(self.plugin_input_panel)
         plugin_panel_layout.addWidget(input_group)
-
-        plugin_shot_group = QGroupBox("截图方式")
-        plugin_shot_layout = QGridLayout(plugin_shot_group)
-        plugin_shot_layout.setContentsMargins(12, 8, 12, 8)
-        plugin_shot_layout.setHorizontalSpacing(12)
-        plugin_shot_layout.setVerticalSpacing(8)
-        plugin_shot_layout.setColumnStretch(0, 1)
-        plugin_shot_layout.setColumnStretch(1, 1)
-
-        self.plugin_screenshot_engine_combo = QComboBox(self)
-        self.plugin_screenshot_engine_combo.setObjectName("plugin_screenshot_engine_combo")
-        self._style_settings_combo(self.plugin_screenshot_engine_combo)
-        self.plugin_screenshot_engine_combo.setMaxVisibleItems(14)
-        self.plugin_screenshot_engine_combo.setToolTip(
-            "随同组「绑定方式」切换：基础为缩写图色，高级为 D3D/OpenGL 明细。"
-        )
-        self.plugin_screenshot_panel = _labeled_field(
-            "截图引擎:", self.plugin_screenshot_engine_combo
-        )
-        self.plugin_screenshot_panel.setObjectName("plugin_screenshot_panel")
-        plugin_shot_layout.addWidget(self.plugin_screenshot_panel, 0, 0)
-        # 边改参数边对绑定列表试绑，结果直接写在这里，不另加按钮
-        self.plugin_bind_probe_status_label = QLabel("", self)
-        self.plugin_bind_probe_status_label.setObjectName("plugin_bind_probe_status_label")
-        self.plugin_bind_probe_status_label.setWordWrap(True)
-        self.plugin_bind_probe_status_label.setStyleSheet(f"color: {get_secondary_text_color()};")
-        self.plugin_bind_probe_status_label.setVisible(False)
-        plugin_shot_layout.addWidget(self.plugin_bind_probe_status_label, 0, 1)
-        plugin_panel_layout.addWidget(plugin_shot_group)
         exec_layout.addWidget(self.plugin_mode_panel)
 
         self._plugin_bind_kind_values = {}
@@ -565,21 +558,6 @@ class GlobalSettingsDialogTabsMixin:
         self._screenshot_engine_combo_ready = True
         self._sync_plugin_input_display_follow()
 
-        for combo in (
-            self.runtime_backend_combo,
-            self.plugin_bind_kind_combo,
-            self.plugin_mouse_combo,
-            self.plugin_keypad_combo,
-            self.plugin_input_display_combo,
-            self.plugin_bind_mode_combo,
-            self.plugin_screenshot_engine_combo,
-        ):
-            combo.currentIndexChanged.connect(self._request_live_plugin_reprobe)
-        self.plugin_input_display_follow_check.toggled.connect(self._request_live_plugin_reprobe)
-        self.plugin_text_ime_check.toggled.connect(self._request_live_plugin_reprobe)
-        self.plugin_fake_active_check.toggled.connect(self._request_live_plugin_reprobe)
-        self._plugin_live_probe_ready = True
-
         exec_layout.addStretch(1)
 
         scroll = QScrollArea()
@@ -598,10 +576,6 @@ class GlobalSettingsDialogTabsMixin:
     def _on_runtime_backend_changed(self, *_args) -> None:
         self._update_runtime_backend_panels(resize_dialog=True)
         self._update_input_backend_visibility(resize_dialog=False)
-        if self._selected_input_backend() == "native":
-            # 让插件模式下尚未完成的旧试绑回调立即失效；再次切回插件时重新试绑。
-            self._plugin_live_probe_generation = int(getattr(self, "_plugin_live_probe_generation", 0)) + 1
-            self._plugin_live_probe_key = None
         if hasattr(self, "_refresh_plugin_probe_feedback"):
             self._refresh_plugin_probe_feedback()
 
@@ -631,10 +605,6 @@ class GlobalSettingsDialogTabsMixin:
             self._sync_plugin_input_display_follow()
         if resize_dialog and self.isVisible():
             QTimer.singleShot(0, self._adjust_dialog_height_only)
-
-    def _update_plugin_mode_panels(self, *, resize_dialog: bool = False) -> None:
-        """兼容旧调用名。"""
-        self._update_runtime_backend_panels(resize_dialog=resize_dialog)
 
     def _current_plugin_bind_kind(self) -> str:
         from utils.plugin.bind_modes import PLUGIN_BIND_KIND_BASIC, normalize_plugin_bind_kind
@@ -689,7 +659,7 @@ class GlobalSettingsDialogTabsMixin:
     ) -> None:
         from utils.plugin.bind_modes import (
             PLUGIN_BIND_KIND_ADVANCED,
-            clamp_choice,
+            pick_plugin_choice,
             plugin_bind_mode_label,
             plugin_bind_mode_options_for_kind,
             plugin_bind_mode_tooltip,
@@ -708,7 +678,7 @@ class GlobalSettingsDialogTabsMixin:
         mode_options = plugin_bind_mode_options_for_kind(kind)
         default_mouse = "dx.mouse.api" if kind == PLUGIN_BIND_KIND_ADVANCED else "normal"
         default_keypad = "dx.keypad.api" if kind == PLUGIN_BIND_KIND_ADVANCED else "normal"
-        default_display = "opengl" if kind == PLUGIN_BIND_KIND_ADVANCED else "normal"
+        default_display = "dx.graphic.opengl" if kind == PLUGIN_BIND_KIND_ADVANCED else "normal"
         default_mode = 101 if kind == PLUGIN_BIND_KIND_ADVANCED else 0
 
         if preferred_mouse is None and hasattr(self, "plugin_mouse_combo"):
@@ -725,14 +695,14 @@ class GlobalSettingsDialogTabsMixin:
         if hasattr(self, "plugin_mouse_combo"):
             self._fill_value_combo(self.plugin_mouse_combo, mouse_options, plugin_mouse_label)
             idx = self.plugin_mouse_combo.findData(
-                clamp_choice(preferred_mouse, mouse_options, default_mouse)
+                pick_plugin_choice(preferred_mouse, mouse_options, default_mouse)
             )
             if idx >= 0:
                 self.plugin_mouse_combo.setCurrentIndex(idx)
         if hasattr(self, "plugin_keypad_combo"):
             self._fill_value_combo(self.plugin_keypad_combo, keypad_options, plugin_keypad_label)
             idx = self.plugin_keypad_combo.findData(
-                clamp_choice(preferred_keypad, keypad_options, default_keypad)
+                pick_plugin_choice(preferred_keypad, keypad_options, default_keypad)
             )
             if idx >= 0:
                 self.plugin_keypad_combo.setCurrentIndex(idx)
@@ -741,7 +711,7 @@ class GlobalSettingsDialogTabsMixin:
                 self.plugin_input_display_combo, display_options, screenshot_engine_label
             )
             idx = self.plugin_input_display_combo.findData(
-                clamp_choice(preferred_display, display_options, default_display)
+                pick_plugin_choice(preferred_display, display_options, default_display)
             )
             if idx >= 0:
                 self.plugin_input_display_combo.setCurrentIndex(idx)
@@ -750,7 +720,7 @@ class GlobalSettingsDialogTabsMixin:
                 self.plugin_bind_mode_combo, mode_options, plugin_bind_mode_label
             )
             idx = self.plugin_bind_mode_combo.findData(
-                clamp_choice(preferred_mode, mode_options, default_mode)
+                pick_plugin_choice(preferred_mode, mode_options, default_mode)
             )
             if idx >= 0:
                 self.plugin_bind_mode_combo.setCurrentIndex(idx)
@@ -767,24 +737,24 @@ class GlobalSettingsDialogTabsMixin:
                 self.plugin_screenshot_engine_combo, display_options, screenshot_engine_label
             )
             idx = self.plugin_screenshot_engine_combo.findData(
-                clamp_choice(preferred_shot, display_options, default_display)
+                pick_plugin_choice(preferred_shot, display_options, default_display)
             )
             if idx >= 0:
                 self.plugin_screenshot_engine_combo.setCurrentIndex(idx)
 
     def _followed_plugin_input_display(self) -> str:
-        from utils.capture.engine_ids import (
-            canonicalize_screenshot_engine,
-            is_plugin_screenshot_engine,
+        from utils.capture.engine_ids import canonicalize_screenshot_engine
+        from utils.plugin.bind_modes import (
+            PLUGIN_BIND_KIND_ADVANCED,
+            pick_plugin_choice,
+            plugin_display_options_for_kind,
         )
-        from utils.plugin.bind_modes import clamp_choice, plugin_display_options_for_kind
 
+        kind = self._current_plugin_bind_kind()
+        options = plugin_display_options_for_kind(kind)
         engine = canonicalize_screenshot_engine(self._get_selected_screenshot_engine())
-        if is_plugin_screenshot_engine(engine):
-            options = plugin_display_options_for_kind(self._current_plugin_bind_kind())
-            return str(clamp_choice(engine, options, options[0]))
-        options = plugin_display_options_for_kind(self._current_plugin_bind_kind())
-        return str(options[0] if options else "normal")
+        default_display = "dx.graphic.opengl" if kind == PLUGIN_BIND_KIND_ADVANCED else "normal"
+        return str(pick_plugin_choice(engine, options, default_display))
 
     def _sync_plugin_input_display_follow(self) -> None:
         if not hasattr(self, "plugin_input_display_combo"):
@@ -1111,8 +1081,8 @@ class GlobalSettingsDialogTabsMixin:
 
         plugin_hint = (
             "插件运行库使用安装目录内 tools/plugin（PluginHost.exe / dm.dll / RegDll.dll）。"
-            "注册码与附加码仅本机保存。附加码对应大漠后台「您的附加码」，可空；"
-            "若后台开了附加白名单则必须填写。"
+            "免注册加载不写 COM 注册表，但仍需注册码与附加码通过大漠授权验证；"
+            "附加码对应大漠后台「您的附加码」，可空。"
         )
         auth_hint = QLabel(plugin_hint)
         auth_hint.setWordWrap(True)
@@ -1137,7 +1107,7 @@ class GlobalSettingsDialogTabsMixin:
         self.plugin_extra_code_edit.setMaxLength(20)
         self.plugin_extra_code_edit.setToolTip(
             "传给 dm.Reg(注册码, 附加码)。仅字母/数字/小数点，最长 20；"
-            "与后台「您的附加码」一致，或留空（未开白名单时）。"
+            "与后台「您的附加码」一致，或留空。"
         )
         auth_layout.addRow("附加码:", self.plugin_extra_code_edit)
 
@@ -1148,8 +1118,7 @@ class GlobalSettingsDialogTabsMixin:
         self.plugin_auth_verify_button = QPushButton("验证授权", verify_row)
         self.plugin_auth_verify_button.setObjectName("plugin_auth_verify_button")
         self.plugin_auth_verify_button.setToolTip(
-            "用当前填写的注册码/附加码起一个临时插件进程做 Ver + Reg，直接显示大漠返回的结果。\n"
-            "每次验证都会向大漠服务器注册一次，请勿频繁点击。"
+            "用当前注册码/附加码起一个临时插件进程做 Ver + Reg；免注册加载不会写 COM 注册表。"
         )
         self.plugin_auth_verify_button.clicked.connect(self._on_verify_plugin_auth_clicked)
         self.plugin_auth_result_label = QLabel("", verify_row)
@@ -1171,7 +1140,7 @@ class GlobalSettingsDialogTabsMixin:
             self.plugin_auth_result_label.setText("失败：请先填写注册码")
             return
         self.plugin_auth_verify_button.setEnabled(False)
-        self.plugin_auth_result_label.setText("验证中，正在启动插件宿主…")
+        self.plugin_auth_result_label.setText("验证中，正在以免注册方式启动插件宿主…")
 
         def _finished(ok: bool, message: str) -> None:
             try:

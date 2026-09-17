@@ -149,7 +149,16 @@ class WindowTaskRunnerExecutionMixin:
             execution_mode = self._get_effective_execution_mode()
 
             workflow_id = self._build_workflow_id()
-            images_dir = self.workflow_data.get('images_dir', None)
+            from task_workflow.workspace import (
+                resolve_runtime_resource_dirs,
+                resource_runtime_kwargs,
+            )
+
+            resource_dirs = resolve_runtime_resource_dirs(
+                self.workflow_data if isinstance(self.workflow_data, dict) else {},
+                workflow_filepath=str(getattr(self, "workflow_file_path", "") or ""),
+            )
+            runtime_dirs = resource_runtime_kwargs(resource_dirs)
 
             self.executor, self.executor_thread = create_coordinated_workflow_runtime(
                 source=ExecutionSource.CONTROL_CENTER,
@@ -157,7 +166,12 @@ class WindowTaskRunnerExecutionMixin:
                 connections_data=connections_list,
                 execution_mode=execution_mode,
                 screenshot_engine=resolve_control_center_screenshot_engine(self),
-                images_dir=images_dir,
+                images_dir=runtime_dirs["images_dir"],
+                sounds_dir=runtime_dirs["sounds_dir"],
+                dicts_dir=runtime_dirs["dicts_dir"],
+                yolo_dir=runtime_dirs["yolo_dir"],
+                replays_dir=runtime_dirs["replays_dir"],
+                plugins_dir=runtime_dirs["plugins_dir"],
                 workflow_id=workflow_id,
                 workflow_filepath=self.workflow_file_path,
                 start_card_ids=session_start_card_ids,
@@ -211,9 +225,12 @@ class WindowTaskRunnerExecutionMixin:
                 )
             self._set_state(TaskState.RUNNING, "工作流启动中")
             logger.info(f"窗口工作流已启动: {window_title} (HWND: {window_hwnd})")
-
-            if self._start_gate_event is not None and hasattr(self.executor, "_start_gate_event"):
-                self.executor._start_gate_event = self._start_gate_event
+            bind_id = str(self.window_info.get("bind_id") or self.job_id or "").strip()
+            if bind_id:
+                try:
+                    self.executor.target_bind_id = bind_id
+                except Exception:
+                    pass
 
             if self._abort_if_stop_requested("执行前收到停止请求"):
                 try:
@@ -253,10 +270,12 @@ class WindowTaskRunnerExecutionMixin:
         step_info = self._card_step_labels.get(str(card_id))
         if step_info:
             self._emit_step(step_info)
-            return
-
-        # 如果没有工作流数据或找不到卡片，至少显示卡片ID
-        self._emit_step(f"执行卡片{card_id}")
+        else:
+            self._emit_step(f"执行卡片{card_id}")
+        try:
+            self.card_executing.emit(int(card_id))
+        except (TypeError, ValueError):
+            pass
 
     def _on_card_finished(self, card_id, success):
         """卡片执行完成回调"""
@@ -264,6 +283,10 @@ class WindowTaskRunnerExecutionMixin:
             self._emit_step("步骤执行成功")
         else:
             self._emit_step("步骤执行失败")
+        try:
+            self.card_finished.emit(int(card_id), bool(success))
+        except (TypeError, ValueError):
+            self.card_finished.emit(0, bool(success))
 
     def _emit_runtime_alert(self, message: str):
         text = str(message or "").strip()
@@ -276,11 +299,22 @@ class WindowTaskRunnerExecutionMixin:
         from .control_center_dispatch import format_runner_runtime_alert
 
         self._emit_runtime_alert(format_runner_runtime_alert("error", card_id, error_message))
+        try:
+            parsed_card_id = int(card_id)
+        except (TypeError, ValueError):
+            parsed_card_id = 0
+        title = str((self.window_info or {}).get("title") or "")
+        try:
+            hwnd = int(self.hwnd or 0)
+        except (TypeError, ValueError):
+            hwnd = 0
+        self.error_occurred.emit(title, hwnd, parsed_card_id, str(error_message or ""))
 
     def _on_executor_warning(self, title, message):
         from .control_center_dispatch import format_runner_runtime_alert
 
         self._emit_runtime_alert(format_runner_runtime_alert("warning", title, message))
+        self.show_warning.emit(str(title or ""), str(message or ""))
 
     def _on_execution_finished(self, success: bool, message: str):
         """工作流执行完成回调"""

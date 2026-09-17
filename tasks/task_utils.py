@@ -9,6 +9,7 @@ import cv2
 import numpy as np
 import sys
 import os
+import math
 import threading
 from pathlib import Path
 from typing import Dict, Any, Tuple, Optional, List
@@ -219,6 +220,14 @@ def get_recorded_region_binding_mismatch_detail(
         )
     )
 
+    if recorded_hwnd_alive and (
+        (recorded_title and normalized_recorded_title != recorded_title)
+        or (recorded_class and normalized_recorded_class != recorded_class)
+    ):
+        # 旧句柄还在，但已经不是录制时的那扇窗口（重启后句柄复用很常见）。
+        recorded_hwnd_alive = False
+        normalized_recorded_hwnd = 0
+
     if normalized_recorded_hwnd > 0 and normalized_recorded_hwnd == normalized_current_hwnd:
         return None
 
@@ -233,10 +242,18 @@ def get_recorded_region_binding_mismatch_detail(
     if equivalent_descendant_hwnd > 0:
         return None
 
-    recorded_compare_title = normalized_recorded_title if normalized_recorded_hwnd > 0 else recorded_title
-    recorded_compare_class = normalized_recorded_class if normalized_recorded_hwnd > 0 else recorded_class
-    recorded_compare_width = normalized_recorded_width if normalized_recorded_width > 0 else recorded_client_width
-    recorded_compare_height = normalized_recorded_height if normalized_recorded_height > 0 else recorded_client_height
+    recorded_compare_title = recorded_title or (
+        normalized_recorded_title if normalized_recorded_hwnd > 0 else ""
+    )
+    recorded_compare_class = recorded_class or (
+        normalized_recorded_class if normalized_recorded_hwnd > 0 else ""
+    )
+    recorded_compare_width = recorded_client_width if recorded_client_width > 0 else (
+        normalized_recorded_width if normalized_recorded_width > 0 else 0
+    )
+    recorded_compare_height = recorded_client_height if recorded_client_height > 0 else (
+        normalized_recorded_height if normalized_recorded_height > 0 else 0
+    )
 
     same_title = bool(recorded_compare_title and recorded_compare_title == normalized_current_title)
     same_class = bool(recorded_compare_class and recorded_compare_class == normalized_current_class)
@@ -247,11 +264,21 @@ def get_recorded_region_binding_mismatch_detail(
         and abs(recorded_compare_height - normalized_current_height) <= REGION_BINDING_CLIENT_SIZE_TOLERANCE
     )
 
-    if same_title and same_class and same_client_size:
+    # 游戏重启后 HWND 必变，客户区尺寸也常变（全屏/窗口化/分辨率）。
+    # 标题+类名能对上即视为同一窗口，不再要求客户区尺寸一致。
+    if same_title and same_class:
+        return None
+    if same_title and same_client_size:
+        return None
+    if same_class and same_client_size:
         return None
 
-    if not recorded_hwnd_alive and not (recorded_title or recorded_class or same_client_size):
-        return None
+    if not recorded_hwnd_alive:
+        # 录制时的句柄已随进程退出。标题或类名任一能对上，即按同一窗口重连。
+        if same_title or same_class:
+            return None
+        if not recorded_title and not recorded_class:
+            return None
 
     detail_parts: List[str] = []
     if recorded_hwnd > 0:
@@ -409,6 +436,9 @@ def capture_and_match_template_smart(
     roi: Optional[Tuple[int, int, int, int]] = None,
     client_area_only: bool = True,
     use_cache: bool = False,
+    template_scale: float = 1.0,
+    mode: str = "彩色",
+    rotation=0,
 ) -> Dict[str, Any]:
     """
     统一执行“截图+模板匹配”本地引擎调用。
@@ -463,6 +493,19 @@ def capture_and_match_template_smart(
         if not isinstance(template, np.ndarray) or template.size == 0:
             failed_response["error"] = "invalid_template"
             return failed_response
+        try:
+            scale = float(template_scale)
+        except (TypeError, ValueError):
+            scale = 1.0
+        if not math.isfinite(scale) or scale <= 0:
+            failed_response["error"] = "invalid_template_scale"
+            return failed_response
+        scale = max(0.25, min(4.0, scale))
+        if abs(scale - 1.0) > 1e-6:
+            height, width = template.shape[:2]
+            resized_width = max(1, int(round(width * scale)))
+            resized_height = max(1, int(round(height * scale)))
+            template = cv2.resize(template, (resized_width, resized_height), interpolation=cv2.INTER_AREA if scale < 1 else cv2.INTER_CUBIC)
         if target_hwnd is None:
             failed_response["error"] = "invalid_hwnd"
             return failed_response
@@ -547,6 +590,8 @@ def capture_and_match_template_smart(
                 timeout=float(attempt_timeout),
                 engine=match_engine,
                 roi=roi_param,
+                mode=mode,
+                rotation=rotation,
             )
 
             if isinstance(response, dict):
@@ -911,7 +956,11 @@ def _normalize_jump_target_id(value: Any) -> Optional[int]:
         return None
 
 
-def correct_image_paths(raw_paths: List[str], card_id: Optional[int] = None) -> List[str]:
+def correct_image_paths(
+    raw_paths: List[str],
+    card_id: Optional[int] = None,
+    images_dir: Optional[str] = None,
+) -> List[str]:
     """【通用工具】智能纠正图片路径列表，支持自动从images目录匹配同名文件
 
     优化版本：使用 ImagePathResolver 统一处理，支持：
@@ -941,17 +990,26 @@ def correct_image_paths(raw_paths: List[str], card_id: Optional[int] = None) -> 
 
     resolver = get_image_path_resolver()
     valid_count = len([p for p in raw_paths if p and p.strip()])
+    search_dirs = [images_dir] if str(images_dir or "").strip() else None
 
     logger.info(f"[路径纠正] 开始解析 {valid_count} 个图片路径")
 
-    corrected_paths = resolver.resolve_many(raw_paths, filter_invalid=True)
+    corrected_paths = resolver.resolve_many(
+        raw_paths,
+        filter_invalid=True,
+        search_dirs=search_dirs,
+    )
 
     logger.info(f"[路径纠正] 完成，有效路径: {len(corrected_paths)}/{valid_count}")
 
     return corrected_paths
 
 
-def correct_single_image_path(raw_path: str, card_id: Optional[int] = None) -> Optional[str]:
+def correct_single_image_path(
+    raw_path: str,
+    card_id: Optional[int] = None,
+    images_dir: Optional[str] = None,
+) -> Optional[str]:
     """【通用工具】纠正单个图片路径
 
     优化版本：使用 ImagePathResolver，带缓存
@@ -959,6 +1017,7 @@ def correct_single_image_path(raw_path: str, card_id: Optional[int] = None) -> O
     Args:
         raw_path: 原始路径
         card_id: 卡片ID（用于日志，可选）
+        images_dir: 当前工作流图片目录（可选；不传则使用资源上下文）
 
     Returns:
         纠正后的路径，失败返回None
@@ -972,6 +1031,7 @@ def correct_single_image_path(raw_path: str, card_id: Optional[int] = None) -> O
         return None
 
     resolver = get_image_path_resolver()
-    return resolver.resolve(raw_path)
+    search_dirs = [images_dir] if str(images_dir or "").strip() else None
+    return resolver.resolve(raw_path, search_dirs=search_dirs)
 
 

@@ -9,21 +9,23 @@
 3. 子工作流不能嵌套（子工作流内不能包含子工作流卡片）
 4. 子工作流有独立的上下文，不与父工作流共享
 """
-import json
 import logging
 import os
 import threading
 import time
 from typing import Dict, Any, Tuple, Optional, Set
 
-from app_core.lca_format.constants import LCA_FILE_FILTER
+from app_core.lca_format.constants import LCA_SAVE_FILTER
+from app_core.lca_format.container import LcaFormatError
+from app_core.lca_format.project_io import is_lca_path
 from tasks.task_utils import (
     handle_failure_action,
     handle_success_action,
 )
 from task_workflow.sub_workflow_path import resolve_sub_workflow_path
 from task_workflow.thread_start import THREAD_START_TASK_TYPE, is_thread_start_task_type
-from task_workflow.workflow_payload import load_workflow_file
+from task_workflow.workflow_identity import normalize_workflow_filepath
+from task_workflow.workflow_payload import load_workflow_package, workflow_body
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +44,7 @@ def _build_sub_workflow_runtime_id(
     normalized_parent_card_id = _normalize_card_id(parent_card_id)
     if normalized_parent_card_id is None:
         raise ValueError(f"父工作流卡片ID无效: {parent_card_id!r}")
-    normalized_workflow_filepath = os.path.abspath(os.path.normpath(str(workflow_filepath or "").strip())) if workflow_filepath else "inline"
+    normalized_workflow_filepath = normalize_workflow_filepath(workflow_filepath) or "inline"
     runtime_id = f"{parent_workflow_id}::sub::{normalized_parent_card_id}::{normalized_workflow_filepath}"
 
     normalized_token = str(execution_token or "").strip()
@@ -83,38 +85,29 @@ def _normalize_connection_type(conn_type: Any) -> str:
     return text
 
 
-def _sanitize_connections(connections: Any) -> list:
-    """清洗连接数据，统一ID类型并过滤非法连接。"""
+def _normalize_connections(connections: Any) -> Tuple[Optional[list], Optional[str]]:
+    if connections is None:
+        return [], None
     if not isinstance(connections, list):
-        logger.warning(f"[子工作流] connections 数据格式错误: {type(connections)}")
-        return []
+        return None, f"connections 数据格式错误: {type(connections)}"
 
     sanitized = []
     for conn in connections:
         if not isinstance(conn, dict):
-            logger.warning(f"[子工作流] 跳过无效连接条目: {type(conn)}")
-            continue
-
+            return None, "子工作流连接数据无效"
         start_id = _normalize_card_id(conn.get("start_card_id"))
         end_id = _normalize_card_id(conn.get("end_card_id"))
         conn_type = _normalize_connection_type(conn.get("type", "sequential"))
-
         if conn_type not in SUPPORTED_CONNECTION_TYPES:
-            logger.warning(f"[子工作流] 跳过未知连接类型: {conn_type}")
-            continue
+            return None, f"子工作流连接类型无效: {conn_type}"
         if start_id is None or end_id is None:
-            logger.warning(
-                f"[子工作流] 跳过无效连接ID: start={conn.get('start_card_id')}, end={conn.get('end_card_id')}"
-            )
-            continue
-
+            return None, "子工作流连接ID无效"
         normalized_conn = dict(conn)
         normalized_conn["start_card_id"] = start_id
         normalized_conn["end_card_id"] = end_id
         normalized_conn["type"] = conn_type
         sanitized.append(normalized_conn)
-
-    return sanitized
+    return sanitized, None
 
 
 def _normalize_cards(cards: Any) -> Tuple[Optional[list], Optional[str]]:
@@ -161,8 +154,8 @@ def get_params_definition() -> Dict[str, Dict[str, Any]]:
         "workflow_file": {
             "label": "工作流文件",
             "type": "file",
-            "file_filter": LCA_FILE_FILTER,
-            "tooltip": "选择要执行的工作流文件（.lca 或 .json）",
+            "file_filter": LCA_SAVE_FILTER,
+            "tooltip": "选择要执行的 .lca 工程文件",
             "required": True
         },
 
@@ -232,12 +225,11 @@ def _extract_parent_workflow_file(kwargs: Dict[str, Any]) -> Optional[str]:
 
 
 def _resolve_sub_workflow_display_name(workflow_data: Dict[str, Any], workflow_file: str) -> str:
-    """解析子工作流展示名，优先使用工作流内名称，其次回退到文件名。"""
+    """解析子工作流展示名，优先使用工作流内名称，没有则用文件名。"""
     if isinstance(workflow_data, dict):
-        for key in ("name", "workflow_name", "title"):
-            candidate = str(workflow_data.get(key) or "").strip()
-            if candidate:
-                return candidate
+        candidate = str(workflow_data.get("name") or "").strip()
+        if candidate:
+            return candidate
 
     filename = os.path.basename(str(workflow_file or "").strip())
     display_name, _ = os.path.splitext(filename)
@@ -276,7 +268,9 @@ def execute_task(params: Dict[str, Any], counters: Dict[str, int],
         return _handle_failure(params, card_id, "父工作流卡片ID无效")
 
     # 获取工作流文件路径
-    workflow_file = params.get('workflow_file')
+    from task_workflow.resource_path import unwrap_resource_path
+
+    workflow_file = unwrap_resource_path(params.get('workflow_file')) or ""
     parent_workflow_file = _extract_parent_workflow_file(kwargs)
 
     if not workflow_file:
@@ -297,80 +291,76 @@ def execute_task(params: Dict[str, Any], counters: Dict[str, int],
         os.path.normpath(resolved_workflow_file)
     ):
         logger.info(
-            f"[子工作流] 已智能修正路径: 原始='{workflow_file}' -> 解析='{resolved_workflow_file}'"
+            f"[子工作流] 路径已解析: 原始='{workflow_file}' -> 解析='{resolved_workflow_file}'"
         )
     workflow_file = resolved_workflow_file
+    if not str(workflow_file).startswith("memory://") and not is_lca_path(workflow_file):
+        logger.error(f"[子工作流] 工作流必须是 .lca 工程: {workflow_file}")
+        return _handle_failure(params, card_id, "工作流必须是 .lca 工程")
 
     try:
-        # 加载工作流文件
         logger.info(f"[子工作流] 加载工作流文件: {workflow_file}")
-        if str(workflow_file).startswith("memory://"):
-            try:
-                workflow_data = load_workflow_file(workflow_file)
-            except FileNotFoundError:
-                from app_core.player.memory_store import get_player_memory_json
-
-                workflow_data = get_player_memory_json(str(workflow_file))
-                if not isinstance(workflow_data, dict):
-                    return _handle_failure(params, card_id, f"内存工作流不存在: {workflow_file}")
-        else:
-            workflow_data = load_workflow_file(workflow_file)
+        workflow_data, nested_session = load_workflow_package(
+            workflow_file,
+            parent_workflow_file=parent_workflow_file,
+        )
         from task_workflow.workflow_sanitize import sanitize_workflow_data
 
         sanitize_workflow_data(workflow_data)
-
-        # 验证工作流格式
-        if 'cards' not in workflow_data:
-            # 检查是否是 .module 格式（包含 workflow 字段）
-            if 'workflow' in workflow_data:
-                workflow_data = workflow_data['workflow']
-            else:
-                logger.error("[子工作流] 工作流文件格式错误：缺少 cards 字段")
-                return _handle_failure(params, card_id, "工作流文件格式错误")
+        workflow_data = workflow_body(workflow_data)
+        if "cards" not in workflow_data:
+            logger.error("[子工作流] 工作流文件格式错误：缺少 cards 字段")
+            return _handle_failure(params, card_id, "工作流文件格式错误")
 
         cards, card_error = _normalize_cards(workflow_data.get('cards', []))
         if card_error:
             logger.error(f"[子工作流] {card_error}")
             return _handle_failure(params, card_id, card_error)
 
-        connections = _sanitize_connections(workflow_data.get('connections', []))
+        connections, connection_error = _normalize_connections(workflow_data.get('connections', []))
+        if connection_error:
+            logger.error(f"[子工作流] {connection_error}")
+            return _handle_failure(params, card_id, connection_error)
 
         logger.info(f"[子工作流] 加载成功 - {len(cards)} 个卡片, {len(connections)} 个连接")
 
         if not cards:
-            logger.warning("[子工作流] 工作流为空，视为成功")
-            return _handle_success(params, card_id)
+            logger.error("[子工作流] 工作流为空")
+            return _handle_failure(params, card_id, "子工作流为空")
 
-        # 【限制3】检查子工作流中是否包含子工作流卡片（禁止嵌套）
         nested_sub_workflows = [c for c in cards if c.get('task_type') == '子工作流']
         if nested_sub_workflows:
             nested_ids = [c.get('id') for c in nested_sub_workflows]
             logger.error(f"[子工作流] 检测到嵌套子工作流（卡片ID: {nested_ids}），子工作流不允许嵌套")
             return _handle_failure(params, card_id, f"子工作流不允许嵌套，发现嵌套卡片: {nested_ids}")
 
-        # 【限制2】检查线程起点数量（必须且只能有一个）
         start_cards = [c for c in cards if _is_start_task_type(c.get('task_type'))]
         if len(start_cards) != 1:
             start_ids = [c.get('id') for c in start_cards]
             logger.error(f"[子工作流] 线程起点数量异常（卡片ID: {start_ids}），子工作流必须且只能有一个线程起点")
             return _handle_failure(params, card_id, f"子工作流必须且只能有一个{THREAD_START_TASK_TYPE}，当前数量: {len(start_cards)}")
 
-        # 构建子工作流内的有效卡片ID集合（用于跳转验证）
         valid_card_ids = {card['id'] for card in cards}
 
         sub_workflow_name = _resolve_sub_workflow_display_name(workflow_data, workflow_file)
+        inherit_window = params.get("inherit_window")
+        if inherit_window is None:
+            inherit_window = True
+        else:
+            inherit_window = bool(inherit_window)
 
-        # 执行子工作流
         success = _execute_sub_workflow(
             cards=cards,
             connections=connections,
             counters=counters,
             execution_mode=execution_mode,
             parent_card_id=card_id,
-            inherit_window=params.get('inherit_window', True),
+            inherit_window=inherit_window,
             sub_workflow_name=sub_workflow_name,
             valid_card_ids=valid_card_ids,
             workflow_filepath=workflow_file,
+            workflow_data=workflow_data,
+            nested_session=nested_session,
             **kwargs
         )
 
@@ -381,12 +371,64 @@ def execute_task(params: Dict[str, Any], counters: Dict[str, int],
             logger.error(f"[子工作流] 执行失败: {os.path.basename(workflow_file)}")
             return _handle_failure(params, card_id, "子工作流执行失败")
 
-    except json.JSONDecodeError as e:
-        logger.error(f"[子工作流] JSON解析错误: {e}")
-        return _handle_failure(params, card_id, f"JSON解析错误: {e}")
+    except FileNotFoundError as e:
+        logger.error(f"[子工作流] 工作流文件不存在: {e}")
+        return _handle_failure(params, card_id, f"文件不存在: {workflow_file}")
+    except LcaFormatError:
+        logger.error("[子工作流] 不是有效的 LCA 工程文件")
+        return _handle_failure(params, card_id, "无法打开：不是有效的 LCA 工程文件")
     except Exception as e:
         logger.error(f"[子工作流] 执行异常: {e}", exc_info=True)
         return _handle_failure(params, card_id, f"执行异常: {e}")
+
+
+def _child_resource_dirs(workflow_data: Optional[Dict[str, Any]], workflow_filepath: Optional[str], nested_session: Any) -> Dict[str, str]:
+    dirs: Dict[str, str] = {}
+    if nested_session is not None and hasattr(nested_session, "resource_dirs"):
+        dirs = dict(nested_session.resource_dirs())
+    filepath = str(workflow_filepath or "").strip()
+    if filepath and not filepath.startswith("memory://") and os.path.isfile(filepath):
+        from task_workflow.workspace import resolve_runtime_resource_dirs, resource_runtime_kwargs
+
+        disk_dirs = resolve_runtime_resource_dirs(
+            workflow_data,
+            workflow_filepath=filepath,
+            default_images_dir=str(dirs.get("images_dir") or ""),
+        )
+        if disk_dirs.get("custom"):
+            dirs = resource_runtime_kwargs(disk_dirs)
+    return dirs
+
+
+def _resolve_child_window(
+    inherit_window: bool,
+    kwargs: Dict[str, Any],
+    parent_executor: Any,
+    card_map: Dict[int, Dict[str, Any]],
+    connections: list,
+    start_card_id: int,
+) -> Tuple[Any, Any]:
+    if inherit_window:
+        hwnd = kwargs.get("target_hwnd")
+        if hwnd is None:
+            hwnd = getattr(parent_executor, "target_hwnd", None)
+        title = kwargs.get("target_window_title")
+        if title is None:
+            title = getattr(parent_executor, "target_window_title", None)
+        return hwnd, title
+    from task_workflow.thread_window_binding import resolve_thread_window_configs
+
+    bound_windows = kwargs.get("bound_windows")
+    if bound_windows is None:
+        bound_windows = getattr(parent_executor, "bound_windows", None) or []
+    configs = resolve_thread_window_configs(
+        cards_data=card_map,
+        connections_data=connections,
+        start_card_ids=[start_card_id],
+        bound_windows=list(bound_windows),
+    )
+    cfg = configs.get(start_card_id) or {}
+    return cfg.get("target_hwnd"), cfg.get("target_window_title")
 
 
 def _execute_sub_workflow(cards: list, connections: list, counters: Dict,
@@ -394,6 +436,8 @@ def _execute_sub_workflow(cards: list, connections: list, counters: Dict,
                          inherit_window: bool = True, sub_workflow_name: str = "",
                          valid_card_ids: Set[int] = None,
                          workflow_filepath: Optional[str] = None,
+                         workflow_data: Optional[Dict[str, Any]] = None,
+                         nested_session: Any = None,
                          **kwargs) -> bool:
     """
     执行子工作流内部逻辑
@@ -461,9 +505,6 @@ def _execute_sub_workflow(cards: list, connections: list, counters: Dict,
         context_switched = True
         logger.debug("[子工作流] 已切换当前上下文到子工作流上下文")
 
-        # 【限制4】执行参数继承父链路，但子工作流执行上下文、计数器和步数限制保持独立
-        target_hwnd = kwargs.get('target_hwnd') if inherit_window else None
-        images_dir = kwargs.get('images_dir', 'images')
         pause_checker = kwargs.get('pause_checker')
 
         if valid_card_ids is None:
@@ -493,66 +534,118 @@ def _execute_sub_workflow(cards: list, connections: list, counters: Dict,
         start_card_id = start_type_cards[0]['id']
         logger.info(f"[子工作流] 从卡片 {start_card_id} 开始执行，无固定步数限制")
 
+        target_hwnd, target_window_title = _resolve_child_window(
+            inherit_window,
+            kwargs,
+            parent_executor,
+            card_map,
+            connections,
+            start_card_id,
+        )
+        child_dirs = _child_resource_dirs(workflow_data, workflow_filepath, nested_session)
+        bound_windows = kwargs.get("bound_windows")
+        if bound_windows is None:
+            bound_windows = getattr(parent_executor, "bound_windows", None)
+        get_image_data = None
+        if nested_session is not None:
+            get_image_data = nested_session.get_bytes
+
+        from contextlib import ExitStack
+
+        from app_core.lca_format.session import (
+            active_session_scope,
+            register,
+            register_temporary,
+        )
+        from task_workflow.resource_context import workflow_resource_scope
         from task_workflow.runtime_factory import create_inprocess_runtime
 
-        sub_executor = create_inprocess_runtime(
-            {
-                "session_mode": "single",
-                "cards_data": card_map,
-                "connections_data": connections,
-                "target_window_title": getattr(parent_executor, 'target_window_title', None),
-                "execution_mode": execution_mode,
-                "start_card_id": start_card_id,
-                "images_dir": images_dir,
-                "target_hwnd": target_hwnd,
-                "workflow_id": sub_workflow_id,
-                "workflow_filepath": workflow_filepath,
-                "workflow_context": sub_workflow_context,
-                "allowed_card_ids": valid_card_ids,
-                "disallowed_task_types": {TASK_NAME},
-                "max_execution_steps": None,
-                "default_step_log_scope": "sub",
-                "default_step_log_name": sub_workflow_name,
-                "external_stop_checker": stop_checker if callable(stop_checker) else None,
-                "external_pause_checker": pause_checker if callable(pause_checker) else None,
-                "cleanup_runtime_image_on_finish": False,
-                "clear_runtime_state_on_start": False,
-                "infinite_loop_guard_enabled": True,
-            },
-            task_modules=get_task_modules(),
-        )
-        if not isinstance(counters, dict):
-            raise TypeError("子工作流计数器格式无效")
-        child_counters = getattr(sub_executor, '_persistent_counters', None)
-        if not isinstance(child_counters, dict):
-            raise TypeError("子工作流执行器计数器格式无效")
-        child_counters.update(dict(counters))
+        session_path = ""
+        if nested_session is not None:
+            filepath_text = str(workflow_filepath or "").strip()
+            if filepath_text and not filepath_text.startswith("memory://") and os.path.isfile(filepath_text):
+                session_path = filepath_text
+                register(session_path, nested_session)
+            else:
+                session_path = register_temporary(nested_session)
 
-        if parent_executor is not None and hasattr(parent_executor, 'step_log'):
-            try:
-                sub_executor.step_log.connect(parent_executor.step_log.emit)
-            except Exception as exc:
-                logger.debug(f"[子工作流] 绑定步骤日志透传失败: {exc}")
-        if (
-            parent_executor is not None
-            and hasattr(parent_executor, 'show_warning')
-            and hasattr(sub_executor, 'show_warning')
-        ):
-            try:
-                sub_executor.show_warning.connect(parent_executor.show_warning.emit)
-            except Exception as exc:
-                logger.debug(f"[子工作流] 绑定警告弹窗透传失败: {exc}")
+        payload = {
+            "session_mode": "single",
+            "cards_data": card_map,
+            "connections_data": connections,
+            "target_window_title": target_window_title,
+            "execution_mode": execution_mode,
+            "start_card_id": start_card_id,
+            "target_hwnd": target_hwnd,
+            "workflow_id": sub_workflow_id,
+            "workflow_filepath": workflow_filepath,
+            "workflow_context": sub_workflow_context,
+            "allowed_card_ids": valid_card_ids,
+            "disallowed_task_types": {TASK_NAME},
+            "max_execution_steps": None,
+            "default_step_log_scope": "sub",
+            "default_step_log_name": sub_workflow_name,
+            "external_stop_checker": stop_checker if callable(stop_checker) else None,
+            "external_pause_checker": pause_checker if callable(pause_checker) else None,
+            "cleanup_runtime_image_on_finish": False,
+            "clear_runtime_state_on_start": False,
+            "infinite_loop_guard_enabled": True,
+            "bound_windows": bound_windows,
+            "custom_width": getattr(parent_executor, "custom_width", kwargs.get("custom_width") or 0),
+            "custom_height": getattr(parent_executor, "custom_height", kwargs.get("custom_height") or 0),
+            "get_image_data": get_image_data,
+        }
+        payload.update(child_dirs)
 
-        if callable(stop_checker) and stop_checker():
-            logger.info("[子工作流] 执行前检测到停止请求")
-            return False
+        with ExitStack() as stack:
+            if session_path:
+                stack.enter_context(active_session_scope(session_path, nested_session))
+            stack.enter_context(
+                workflow_resource_scope(
+                    images_dir=str(child_dirs.get("images_dir") or ""),
+                    sounds_dir=str(child_dirs.get("sounds_dir") or ""),
+                    dicts_dir=str(child_dirs.get("dicts_dir") or ""),
+                    yolo_dir=str(child_dirs.get("yolo_dir") or ""),
+                    replays_dir=str(child_dirs.get("replays_dir") or ""),
+                    plugins_dir=str(child_dirs.get("plugins_dir") or ""),
+                )
+            )
+            sub_executor = create_inprocess_runtime(payload, task_modules=get_task_modules())
+            if not isinstance(counters, dict):
+                raise TypeError("子工作流计数器格式无效")
+            child_counters = getattr(sub_executor, '_persistent_counters', None)
+            if not isinstance(child_counters, dict):
+                raise TypeError("子工作流执行器计数器格式无效")
+            child_counters.update(dict(counters))
 
-        sub_executor.run()
-        sub_execution_succeeded = bool(sub_executor._last_execution_success)
-        logger.info(
-            f"[子工作流] 执行完成，结果: {'成功' if sub_execution_succeeded else '失败'}"
-        )
-        return sub_execution_succeeded
+            if parent_executor is not None and hasattr(parent_executor, 'step_log'):
+                try:
+                    sub_executor.step_log.connect(parent_executor.step_log.emit)
+                except Exception as exc:
+                    logger.debug(f"[子工作流] 绑定步骤日志透传失败: {exc}")
+            if (
+                parent_executor is not None
+                and hasattr(parent_executor, 'show_warning')
+                and hasattr(sub_executor, 'show_warning')
+            ):
+                try:
+                    sub_executor.show_warning.connect(parent_executor.show_warning.emit)
+                except Exception as exc:
+                    logger.debug(f"[子工作流] 绑定警告弹窗透传失败: {exc}")
+
+            if callable(stop_checker) and stop_checker():
+                logger.info("[子工作流] 执行前检测到停止请求")
+                return False
+
+            sub_executor.run()
+            if bool(getattr(sub_executor, "_stop_requested", False) or getattr(sub_executor, "_force_stop", False)):
+                logger.info("[子工作流] 执行被停止")
+                return False
+            sub_execution_succeeded = bool(sub_executor._last_execution_success)
+            logger.info(
+                f"[子工作流] 执行完成，结果: {'成功' if sub_execution_succeeded else '失败'}"
+            )
+            return sub_execution_succeeded
 
     except Exception as e:
         logger.error(f"[子工作流] 内部执行异常: {e}", exc_info=True)

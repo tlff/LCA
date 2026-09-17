@@ -82,6 +82,7 @@ _DEFAULT_CONFIG = {
     "plugin_bind_mode": 0,
     "plugin_text_ime": False,
     "plugin_fake_active": False,
+    "plugin_public": [],
     "plugin_reg_code": "",
     "plugin_extra_code": "",
     "binding_method": "enhanced",
@@ -106,6 +107,7 @@ _REMOVED_CONFIG_KEYS = (
     "stop_hotkey",
     "foreground_driver_backend",
     "plugin_dir",  # 插件目录固定为安装目录 tools/plugin，不再可配置
+    "theme_pack",
 ) + OLD_SCHEDULE_KEYS
 
 _EXECUTION_MODES = (
@@ -178,6 +180,7 @@ def _validate_execution_settings(config: dict) -> None:
         normalize_plugin_bind_mode,
         normalize_plugin_keypad,
         normalize_plugin_mouse,
+        normalize_plugin_public,
         plugin_bind_mode_options_for_kind,
         plugin_display_options_for_kind,
         plugin_keypad_options_for_kind,
@@ -229,17 +232,24 @@ def _validate_execution_settings(config: dict) -> None:
     config["plugin_bind_mode"] = bind_mode
     for key in ("plugin_input_display_follow", "plugin_text_ime", "plugin_fake_active"):
         _require_bool(config, key)
+    config["plugin_public"] = list(normalize_plugin_public(config.get("plugin_public")))
     for key in ("plugin_reg_code", "plugin_extra_code"):
         _require_str(config, key)
 
     if config["input_backend"] == "plugin":
-        if is_plugin_screenshot_engine(engine) and engine not in plugin_display_options_for_kind(kind):
+        if not is_plugin_screenshot_engine(engine):
+            raise ValueError(f"插件执行模式必须使用插件截图引擎，不能使用 {engine!r}")
+        if engine not in plugin_display_options_for_kind(kind):
             raise ValueError(f"插件截图引擎 {engine!r} 不属于绑定方式 {kind!r}")
         # 插件键鼠只能按后台消息执行；原生模式单独保存在 native_execution_mode。
         from utils.input_simulation.mode_utils import PLUGIN_EXECUTION_MODE
 
         config["execution_mode"] = PLUGIN_EXECUTION_MODE
     else:
+        from utils.capture.engine_ids import is_native_screenshot_engine
+
+        if not is_native_screenshot_engine(engine):
+            raise ValueError(f"原生执行模式必须使用原生截图引擎，不能使用 {engine!r}")
         config["native_execution_mode"] = config["execution_mode"]
 
 

@@ -317,10 +317,16 @@ if errorlevel 1 (
 
 set "STEP=BUILD_MAIN_INSTALLER"
 echo Build main installer...
+set "LCA_RELEASE_DATE="
+for /f "usebackq delims=" %%i in (`venv\Scripts\python.exe build_assets\packaging\write_build_metadata.py --print-release-date`) do set "LCA_RELEASE_DATE=%%i"
+if "%LCA_RELEASE_DATE%"=="" (
+    set "ERRMSG=Failed to resolve installer date stamp"
+    goto fail
+)
 if "%LCA_NONINTERACTIVE%"=="1" (
-    "%ISCC%" /DNonInteractive=1 "%SCRIPT_DIR_NOSLASH%\setup.iss"
+    "%ISCC%" /DMyReleaseDate=%LCA_RELEASE_DATE% /DNonInteractive=1 "%SCRIPT_DIR_NOSLASH%\setup.iss"
 ) else (
-    "%ISCC%" "%SCRIPT_DIR_NOSLASH%\setup.iss"
+    "%ISCC%" /DMyReleaseDate=%LCA_RELEASE_DATE% "%SCRIPT_DIR_NOSLASH%\setup.iss"
 )
 if errorlevel 1 (
     set "ERRMSG=Main installer build failed"
@@ -330,7 +336,7 @@ if errorlevel 1 (
 echo.
 echo ========================================
 echo   Build complete
-echo   Installer: build_assets\packaging\release_output\LCA_测试版_Setup.exe
+echo   Installer: build_assets\packaging\release_output\LCA_%LCA_RELEASE_DATE%测试版_Setup.exe
 echo ========================================
 echo.
 if not "%LCA_NONINTERACTIVE%"=="1" pause

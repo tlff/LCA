@@ -5,6 +5,7 @@
 
 from .base import BaseInputSimulator, InputSimulatorType, ElementNotFoundError
 from .standard_window import StandardWindowInputSimulator
+from .plugin_simulator import PluginInputSimulator
 from .factory import (
     InputSimulatorFactory,
     GlobalInputSimulatorManager,
@@ -18,6 +19,7 @@ __all__ = [
     'InputSimulatorType',
     'ElementNotFoundError',
     'StandardWindowInputSimulator',
+    'PluginInputSimulator',
     'InputSimulatorFactory',
     'GlobalInputSimulatorManager',
     'global_input_simulator_manager',

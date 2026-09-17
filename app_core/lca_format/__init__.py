@@ -1,4 +1,4 @@
-"""LCA 编辑器 `.lca` 工程格式（LCA1 容器）。"""
+"""LCA 编辑器 `.lca` 工程包（外层 zip，脚本加密，资源不加密）。"""
 
 from app_core.lca_format.constants import LCA_EXTENSION, USER_ERROR_INVALID
 from app_core.lca_format.container import LcaFormatError, seal_lca_bytes, unseal_lca_bytes

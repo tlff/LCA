@@ -84,6 +84,111 @@ def get_active_bound_window_hwnd(config: Optional[Dict[str, Any]]) -> Optional[i
     return None
 
 
+def _alive_hwnd(hwnd: Any, hwnd_alive) -> Optional[int]:
+    handle = as_hwnd(hwnd)
+    if handle and hwnd_alive(handle):
+        return handle
+    return None
+
+
+def _hwnd_from_window_info(window_info: Optional[Dict[str, Any]], hwnd_alive) -> Optional[int]:
+    if not isinstance(window_info, dict):
+        return None
+    hwnd = _alive_hwnd(window_info.get("hwnd"), hwnd_alive)
+    if hwnd:
+        return hwnd
+    hwnd = as_hwnd(resolve_bound_window_hwnd(window_info, hwnd_alive=hwnd_alive))
+    if hwnd:
+        apply_window_identity(window_info, hwnd)
+        return hwnd
+    return None
+
+
+def _enabled_bound_hwnds(windows: Optional[List[Dict[str, Any]]]) -> set:
+    hwnds = set()
+    if not isinstance(windows, list):
+        return hwnds
+    for item in windows:
+        if not isinstance(item, dict) or not item.get("enabled", True):
+            continue
+        for key in ("hwnd", "display_hwnd"):
+            handle = as_hwnd(item.get(key))
+            if handle:
+                hwnds.add(handle)
+    return hwnds
+
+
+def _host_enabled_bound_hwnds(host: Any) -> Optional[set]:
+    """当前启用的绑定句柄。运行时 bound_windows 优先，不并入配置里的旧副本。"""
+    if host is None:
+        return None
+    runtime = getattr(host, "bound_windows", None)
+    if isinstance(runtime, list):
+        return _enabled_bound_hwnds(runtime)
+    config = getattr(host, "config", None)
+    if isinstance(config, dict):
+        native = get_native_bound_windows(config)
+        if native:
+            return _enabled_bound_hwnds(native)
+        return _enabled_bound_hwnds(get_active_bound_windows(config))
+    return None
+
+
+def resolve_live_target_hwnd(
+    host: Any,
+    cached_hwnd: Optional[Any] = None,
+    *,
+    hwnd_alive: Optional[Any] = None,
+) -> Optional[int]:
+    """按当前绑定列表解析截图/取点用的目标窗口句柄。
+
+    顺序：宿主任务绑定、运行时 bound_windows、配置、调用方缓存。
+    已从绑定列表移除的句柄一律不用，即使窗口还开着。
+    """
+    alive = hwnd_alive or is_window_alive
+    if host is None:
+        return _alive_hwnd(cached_hwnd, alive)
+
+    bound_hwnds = _host_enabled_bound_hwnds(host)
+    candidates: List[Any] = []
+    resolve_preferred = getattr(host, "_resolve_panel_target_hwnd", None)
+    if callable(resolve_preferred):
+        try:
+            preferred = resolve_preferred()
+        except Exception:
+            preferred = None
+        if preferred:
+            candidates.append(preferred)
+
+    bound_windows = getattr(host, "bound_windows", None)
+    from_bound = _hwnd_from_window_info(
+        get_first_enabled_bound_window(bound_windows if isinstance(bound_windows, list) else None),
+        alive,
+    )
+    if from_bound:
+        candidates.append(from_bound)
+
+    config = getattr(host, "config", None)
+    if isinstance(config, dict) and not isinstance(bound_windows, list):
+        from_config = _hwnd_from_window_info(get_active_bound_window(config), alive)
+        if from_config:
+            candidates.append(from_config)
+
+    if cached_hwnd:
+        candidates.append(cached_hwnd)
+
+    seen = set()
+    for candidate in candidates:
+        handle = _alive_hwnd(candidate, alive)
+        if not handle or handle in seen:
+            continue
+        seen.add(handle)
+        if bound_hwnds is not None and handle not in bound_hwnds:
+            continue
+        return handle
+    return None
+
+
 def get_active_window_binding_mode(config: Optional[Dict[str, Any]]) -> str:
     if isinstance(config, dict):
         mode = str(config.get("active_window_binding_mode", "") or "").strip().lower()
@@ -130,8 +235,6 @@ def resolve_plugin_bind_hwnds(
     input_target = explicit_input if explicit_input > 0 else display
     if display <= 0:
         return 0, 0
-    if input_target > 0 and input_target != display and not is_window_alive(input_target):
-        return display, display
     return display, input_target
 
 

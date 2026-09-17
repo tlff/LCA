@@ -44,7 +44,11 @@ class MainWindowExecutionHelperMixin:
 
                 "task_modules": self.task_modules,  # 任务模块字典
 
-                "images_dir": self.images_dir,      # 图片目录
+                "images_dir": getattr(tasks[0], "images_dir", None) or self.images_dir if tasks else self.images_dir,
+                "sounds_dir": getattr(tasks[0], "sounds_dir", None) if tasks else None,
+                "dicts_dir": getattr(tasks[0], "dicts_dir", None) if tasks else None,
+                "yolo_dir": getattr(tasks[0], "yolo_dir", None) if tasks else None,
+                "replays_dir": getattr(tasks[0], "replays_dir", None) if tasks else None,
 
             }
 
@@ -284,19 +288,23 @@ class MainWindowExecutionHelperMixin:
 
                 return False
 
-            # 为没有路径的任务分配文件名
+            from task_workflow.workspace import prepare_exclusive_workflow_save
 
-            for task, _ in tasks_without_path:
-
+            for index, (task, workflow_data) in enumerate(tasks_to_save):
+                if task.filepath:
+                    continue
                 base_name = task.name if task.name else "工作流"
-
                 base_name = os.path.splitext(base_name)[0]
-
-                filepath = os.path.join(save_dir, f"{base_name}.lca")
-
+                data = workflow_data if isinstance(workflow_data, dict) else {}
+                filepath = prepare_exclusive_workflow_save(
+                    data,
+                    os.path.join(save_dir, f"{base_name}.lca"),
+                    source_filepath=str(task.filepath or ""),
+                )
+                task.update_workflow_data(data)
                 task.filepath = filepath
-
-                task.name = os.path.basename(filepath)
+                task.name = os.path.splitext(os.path.basename(filepath))[0]
+                tasks_to_save[index] = (task, data)
 
         # 检测同名冲突并处理
 
@@ -359,6 +367,8 @@ class MainWindowExecutionHelperMixin:
                 saved_count += 1
 
                 self._sync_favorite_path_after_save(old_filepath, task_item)
+
+                self._sync_saved_task_resources(task_item, latest_workflow_data)
 
                 logger.info(f"任务 '{task_item.name}' 保存和备份成功")
 

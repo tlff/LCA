@@ -10,7 +10,7 @@
 build_assets\packaging\build_release.bat
 ```
 
-插件运行库放在 `tools/plugin/`（`PluginHost.exe`、`dm.dll`、`RegDll.dll`，以及大漠附属 `xx.dat`）。打包时只按文件白名单纳入：Nuitka 用 `--include-data-files`，`stage_packaged_runtime_assets.py` 再拷到发行目录并清掉其它残留；目录不存在或白名单文件都缺则跳过，插件截图引擎在发行包中会不可用。
+插件运行库放在 `tools/plugin/`。`PluginHost.exe`、`dm.dll`、`RegDll.dll` 是必需文件，缺少任一项立即终止打包；`xx.dat` 是可选附属文件。打包时只按文件白名单纳入：Nuitka 用 `--include-data-files`，`stage_packaged_runtime_assets.py` 再拷到发行目录并清掉其它残留。
 
 离线双身份（行业常见、无授权）：
 
@@ -22,10 +22,10 @@ build_assets\packaging\build_release.bat
 
 播放器 exe 印记与 `package.lcap` 共享随机 `bind_id`：换包/混用不同导出批次会无法启动（防挪包；不防本地补丁）。
 
-本机已安装 Inno Setup 6 时，继续生成编辑器安装包：
+本机已安装 Inno Setup 6 时，继续生成编辑器安装包。文件名按打包当天的日期写成 `LCA_<月>.<日>测试版_Setup.exe`，月日不补零。例如 9 月 16 日：
 
 ```text
-build_assets\packaging\release_output\LCA_测试版_Setup.exe
+build_assets\packaging\release_output\LCA_9.16测试版_Setup.exe
 ```
 
 无交互环境可设置 `LCA_NONINTERACTIVE=1`。

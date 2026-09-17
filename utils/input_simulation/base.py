@@ -238,7 +238,8 @@ class BaseInputSimulator(ABC):
         found_index: int = 0,
         search_depth: int = 10,
         timeout: float = 5.0,
-        use_invoke: bool = True
+        use_invoke: bool = True,
+        strict_invoke: bool = False,
     ) -> bool:
         """
         点击UI元素（基于UIAutomation）
@@ -255,6 +256,7 @@ class BaseInputSimulator(ABC):
             search_depth: 搜索深度
             timeout: 超时时间（秒）
             use_invoke: True使用Invoke模式（不移动鼠标），False使用坐标点击
+            strict_invoke: True 时 Invoke/坐标不可用直接失败，不执行隐式 Click 回退
 
         Returns:
             bool: 操作是否成功

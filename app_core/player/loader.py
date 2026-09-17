@@ -25,13 +25,14 @@ from app_core.player.secure_package import (
 )
 from app_core.player.memory_store import get_player_memory_json, list_player_memory_files
 from task_workflow.workflow_payload import load_workflow_json
-from utils.app_paths import get_app_root, is_packaged_runtime, resolve_running_executable
+from app_core.player.script_metadata import validate_release_metadata, verify_release_workflow
+from utils.app_paths import get_app_root, get_plugin_dir, is_packaged_runtime, resolve_running_executable
 
 logger = logging.getLogger(__name__)
 
 PLAYER_FLAG = "--player"
 PACKAGE_FLAG = "--package"
-WORKER_FLAGS = ("--ocr-worker", "--workflow-worker")
+WORKER_FLAGS = ("--ocr-worker", "--workflow-worker", "--external-component-worker")
 
 # 产品角色：离线双身份（与 PE 印记一致）
 ROLE_PLAYER = ENTRY_PLAYER
@@ -256,7 +257,6 @@ def apply_player_isolation(argv: Optional[Sequence[str]] = None) -> Optional[Pat
     userdata_dir.mkdir(parents=True, exist_ok=True)
     os.environ["LCA_EXPORT_ROOT"] = str(export_root)
     os.environ["LCA_USER_DATA_DIR"] = str(userdata_dir)
-    os.environ.pop("LCA_PORTABLE", None)
     cleanup_extracted_package(export_root)
     return open_package_dir(export_root)
 
@@ -298,13 +298,13 @@ def load_package_scripts(
             return
         seen.add(sid)
         path = str(item.get("path") or item.get("source") or f"workflows/scripts/{sid}.json")
-        metas.append(
-            {
-                "id": sid,
-                "title": str(item.get("title") or sid).strip() or sid,
-                "path": path.replace("\\", "/"),
-            }
-        )
+        meta = {
+            "id": sid,
+            "title": str(item.get("title") or sid).strip() or sid,
+            "path": path.replace("\\", "/"),
+        }
+        meta.update(validate_release_metadata(item))
+        metas.append(meta)
 
     for item in manifest.get("scripts") or []:
         if isinstance(item, Mapping):
@@ -320,6 +320,10 @@ def load_package_scripts(
     for meta in metas:
         sid = meta["id"]
         data = _try_load_script_payload(meta["path"], package_dir)
+        if "workflow_sha256" in meta:
+            if data is None:
+                raise ValueError(f"发布脚本工作流缺失或无效: {sid}")
+            verify_release_workflow(meta, data)
         if data is None:
             data = _try_load_script_payload(f"workflows/scripts/{sid}.json", package_dir)
         if isinstance(data, dict):
@@ -384,6 +388,10 @@ def load_player_package(package_dir: Path | str) -> PlayerPackage:
             userdata_dir=str(userdata_dir),
             assets_images_dir="",
             assets_sounds_dir="",
+            assets_dicts_dir="",
+            assets_replays_dir="",
+            assets_yolo_dir="",
+            assets_plugins_dir=get_plugin_dir(),
             entry_workflow_path=entry_uri,
             manifest=manifest,
             ui=ui,
@@ -425,8 +433,22 @@ def load_player_package(package_dir: Path | str) -> PlayerPackage:
     assets_root = root / "assets"
     images_dir = assets_root / "images"
     sounds_dir = assets_root / "sounds"
+    replays_dir = assets_root / "replays"
     images_dir.mkdir(parents=True, exist_ok=True)
     sounds_dir.mkdir(parents=True, exist_ok=True)
+    replays_dir.mkdir(parents=True, exist_ok=True)
+    images_dicts_dir = images_dir / "dicts"
+    assets_dicts_dir = assets_root / "dicts"
+    if images_dicts_dir.is_dir():
+        dicts_dir = images_dicts_dir
+    else:
+        assets_dicts_dir.mkdir(parents=True, exist_ok=True)
+        dicts_dir = assets_dicts_dir
+    yolo_dir = assets_root / "yolo"
+    if not yolo_dir.is_dir() and (assets_root / "models").is_dir():
+        yolo_dir = assets_root / "models"
+    yolo_dir.mkdir(parents=True, exist_ok=True)
+    plugin_dir = Path(get_plugin_dir())
 
     if not export_root:
         export_root = root.parent if root.name == "package" else root
@@ -439,6 +461,10 @@ def load_player_package(package_dir: Path | str) -> PlayerPackage:
         userdata_dir=str(userdata_dir),
         assets_images_dir=str(images_dir),
         assets_sounds_dir=str(sounds_dir),
+        assets_dicts_dir=str(dicts_dir),
+        assets_replays_dir=str(replays_dir),
+        assets_yolo_dir=str(yolo_dir),
+        assets_plugins_dir=str(plugin_dir) if plugin_dir.is_dir() else "",
         entry_workflow_path=str(entry_path),
         manifest=manifest,
         ui=ui,
@@ -451,10 +477,20 @@ def load_player_package(package_dir: Path | str) -> PlayerPackage:
 
 
 def prepare_player_search_paths(package: PlayerPackage) -> None:
-    from app_core.player.runtime_images import materialize_player_sounds
+    from app_core.player.runtime_images import (
+        materialize_player_components,
+        materialize_player_dicts,
+        materialize_player_replays,
+        materialize_player_sounds,
+        materialize_player_yolo,
+    )
 
-    # 密封包没有磁盘 assets 目录，音效仍要从 memory 落到 userdata。
+    # 密封包没有磁盘 assets 目录，音效/回放/字库/模型/组件仍要从 memory 落到 userdata。
     materialize_player_sounds(package.userdata_dir)
+    materialize_player_replays(package.userdata_dir)
+    materialize_player_dicts(package.userdata_dir)
+    materialize_player_yolo(package.userdata_dir)
+    materialize_player_components(package.userdata_dir)
     if package.assets_images_dir:
         from utils.image_paths import get_image_path_resolver
 
@@ -469,6 +505,23 @@ def prepare_player_search_paths(package: PlayerPackage) -> None:
             if not os.path.isfile(source):
                 continue
             destination = os.path.join(userdata_sounds, name)
+            if os.path.isfile(destination):
+                continue
+            try:
+                os.link(source, destination)
+            except OSError:
+                import shutil
+
+                shutil.copy2(source, destination)
+    components_src = os.path.join(str(package.package_dir or ""), "assets", "components")
+    if os.path.isdir(components_src):
+        userdata_components = os.path.join(package.userdata_dir, "components")
+        os.makedirs(userdata_components, exist_ok=True)
+        for name in os.listdir(components_src):
+            source = os.path.join(components_src, name)
+            if not os.path.isfile(source):
+                continue
+            destination = os.path.join(userdata_components, name)
             if os.path.isfile(destination):
                 continue
             try:

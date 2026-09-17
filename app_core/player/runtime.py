@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any, Callable, Mapping, Optional
 
 from app_core.player.package import PlayerPackage
@@ -15,6 +16,31 @@ from task_workflow.workflow_payload import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _player_package_resource_dirs(package: PlayerPackage) -> dict[str, str]:
+    images = package.assets_images_dir or ""
+    sounds = package.assets_sounds_dir or ""
+    dicts = package.assets_dicts_dir or ""
+    yolo = package.assets_yolo_dir or ""
+    replays = package.assets_replays_dir or ""
+    from utils.app_paths import get_plugin_dir
+
+    plugins = package.assets_plugins_dir or get_plugin_dir()
+    if not images:
+        userdata = package.userdata_dir
+        sounds = sounds or os.path.join(userdata, "sounds")
+        dicts = dicts or os.path.join(userdata, "dicts")
+        replays = replays or os.path.join(userdata, "replays")
+        yolo = yolo or os.path.join(userdata, "yolo")
+    return {
+        "images_dir": images,
+        "sounds_dir": sounds,
+        "dicts_dir": dicts,
+        "yolo_dir": yolo,
+        "replays_dir": replays,
+        "plugins_dir": plugins,
+    }
 
 
 class PlayerRuntimeController:
@@ -163,13 +189,22 @@ class PlayerRuntimeController:
             raise RuntimeError(block_message)
         screenshot_engine = str(self._config.get("screenshot_engine") or "wgc").strip().lower()
         workflow_filepath = self._resolve_workflow_path(sid)
+        from task_workflow.resource_context import bind_resource_dirs
+
+        resource_dirs = _player_package_resource_dirs(self._package)
+        bind_resource_dirs(resource_dirs)
         self.executor, self.executor_thread = create_coordinated_workflow_runtime(
             source=ExecutionSource.PLAYER,
             cards_data=cards_data,
             connections_data=connections_data,
             execution_mode=execution_mode,
             screenshot_engine=screenshot_engine,
-            images_dir=self._package.assets_images_dir,
+            images_dir=resource_dirs["images_dir"],
+            sounds_dir=resource_dirs["sounds_dir"],
+            dicts_dir=resource_dirs["dicts_dir"],
+            yolo_dir=resource_dirs["yolo_dir"],
+            replays_dir=resource_dirs["replays_dir"],
+            plugins_dir=resource_dirs["plugins_dir"],
             workflow_id=f"player:{sid}" if sid else "player",
             workflow_filepath=workflow_filepath,
             prefer_memory_reference=str(workflow_filepath or "").startswith("memory://"),

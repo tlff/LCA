@@ -172,6 +172,9 @@ def locate_image_in_window(
         roi=recognition_region,
         client_area_only=True,
         use_cache=False,
+        template_scale=coerce_float((params or {}).get('template_scale', 1.0), 1.0),
+        mode=str((params or {}).get('image_mode', '彩色') or '彩色'),
+        rotation=(params or {}).get('image_rotation', 0),
     )
 
     if not match_response or not bool(match_response.get("success")):
@@ -824,6 +827,9 @@ def execute_task(params: Dict[str, Any], counters: Dict[str, int], execution_mod
                 roi=roi_param,
                 client_area_only=True,
                 use_cache=False,
+                template_scale=coerce_float(params.get('template_scale', 1.0), 1.0),
+                mode=str(params.get('image_mode', '彩色') or '彩色'),
+                rotation=params.get('image_rotation', 0),
             )
 
             if _is_stop_requested():
@@ -1294,6 +1300,4 @@ def test_image_recognition(params: Dict[str, Any], target_hwnd: Optional[int] = 
         unified_test(params, target_hwnd, main_window, parameter_panel)
     except Exception as e:
         logger.error(f"调用统一测试函数失败: {e}", exc_info=True)
-
-
 

@@ -52,13 +52,22 @@ class MainWindowSaveMixin:
             if not save_dir:
                 QMessageBox.warning(self, "保存取消", "未选择保存目录，保存已取消")
                 return
-            # 为没有路径的任务分配文件名
-            for task, _ in tasks_without_path:
+            from task_workflow.workspace import prepare_exclusive_workflow_save
+            for index, (task, workflow_data) in enumerate(tasks_to_save):
+                if task.filepath:
+                    continue
                 base_name = task.name if task.name else "工作流"
                 base_name = os.path.splitext(base_name)[0]
-                filepath = os.path.join(save_dir, f"{base_name}.lca")
+                data = workflow_data if isinstance(workflow_data, dict) else {}
+                filepath = prepare_exclusive_workflow_save(
+                    data,
+                    os.path.join(save_dir, f"{base_name}.lca"),
+                    source_filepath=str(task.filepath or ""),
+                )
+                task.update_workflow_data(data)
                 task.filepath = filepath
-                task.name = os.path.basename(filepath)
+                task.name = os.path.splitext(os.path.basename(filepath))[0]
+                tasks_to_save[index] = (task, data)
         # 检测同名冲突并处理
         filepath_count = {}
         for task, workflow_data in tasks_to_save:
@@ -91,6 +100,7 @@ class MainWindowSaveMixin:
             if task.save_and_backup(workflow_data=workflow_data):
                 saved_count += 1
                 self._sync_favorite_path_after_save(old_filepath, task)
+                self._sync_saved_task_resources(task, workflow_data)
                 self.workflow_tab_widget._update_tab_status(task.task_id)
                 logger.info(f"已保存并备份: {task.filepath}")
             else:
@@ -172,8 +182,8 @@ class MainWindowSaveMixin:
     def save_workflow_as(self):
         """Saves the current workflow to a new file chosen by the user."""
         from PySide6.QtWidgets import QFileDialog
-        from utils.app_paths import get_workflows_dir
-        default_filename = os.path.join(get_workflows_dir(), "workflow.lca")
+        from task_workflow.workspace import default_new_workflow_filepath, exclusive_workflow_filepath
+        default_filename = default_new_workflow_filepath("workflow")
         current_path = self.current_save_path or default_filename
         current_path = os.path.splitext(current_path)[0] + ".lca"
         filepath, filetype = QFileDialog.getSaveFileName(
@@ -186,6 +196,7 @@ class MainWindowSaveMixin:
             return # User cancelled
         if not filepath.lower().endswith(".lca"):
             filepath += ".lca"
+        filepath = exclusive_workflow_filepath(filepath)
         # 保存为普通工作流文件
         self.current_save_path = filepath # Remember path for next time
 

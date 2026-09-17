@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from typing import Tuple
 
-from PySide6.QtCore import QEvent, QPoint, QRect, QRectF, QSize, Qt, QStringListModel, QTimer
+from PySide6.QtCore import QEvent, QPoint, QRect, QRectF, QSize, Qt, QStringListModel, QTimer, Signal
 from PySide6.QtGui import (
     QBrush,
     QColor,
@@ -16,6 +16,7 @@ from PySide6.QtGui import (
     QPainterPath,
     QPalette,
     QPen,
+    QTextBlockUserData,
     QTextCursor,
     QTextDocument,
     QTextFormat,
@@ -33,7 +34,9 @@ from tasks.script_hints import (
     resolve_script_hint,
 )
 from task_workflow.script_sandbox import (
+    map_script_punct_char,
     normalize_script_punctuation,
+    string_open_quote,
 )
 from tasks.script_task import (
     align_block_keyword_line,
@@ -45,7 +48,20 @@ from tasks.script_task import (
     script_completion_names,
 )
 
-from .script_syntax_highlighter import ScriptSyntaxHighlighter, is_dark_theme
+from .script_syntax_highlighter import (
+    _STATE_TRIPLE_DOUBLE,
+    _STATE_TRIPLE_SINGLE,
+    ScriptSyntaxHighlighter,
+    is_dark_theme,
+)
+
+
+class _BreakpointData(QTextBlockUserData):
+    """挂在 QTextBlock 上的断点标记；块随内容增删自动迁移，断点也随之跟随。"""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.breakpoint = True
 
 
 class _LineNumberArea(QWidget):
@@ -59,9 +75,23 @@ class _LineNumberArea(QWidget):
     def paintEvent(self, event) -> None:
         self._editor.paint_line_numbers(event)
 
+    def mousePressEvent(self, event) -> None:
+        # 左键点在行号旁即切换该行断点，和「断点」按钮走同一处理。
+        if event.button() == Qt.MouseButton.LeftButton:
+            line = self._editor.line_at_area_y(event.position().y())
+            if line:
+                self._editor.breakpoint_toggle_requested.emit(int(line))
+                return
+        super().mousePressEvent(event)
+
 
 class ScriptCodeEdit(QPlainTextEdit):
     """自定义脚本编辑区：语法高亮、行号、当前行、补全和缩进。"""
+
+    # 断点集合变化时发出当前全部断点行号（1 基）的集合。
+    breakpoints_changed = Signal(object)
+    # 行号区被点击请求切换某行断点（1 基行号）。
+    breakpoint_toggle_requested = Signal(int)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -71,21 +101,137 @@ class ScriptCodeEdit(QPlainTextEdit):
         self._highlighter = ScriptSyntaxHighlighter(self.document(), dark=self._dark)
         self._completer = None
         self._signature_hint = None
+        self._execution_line = None
+        self._breakpoint_snapshot: set = set()
         self._hide_hint_timer = QTimer(self)
         self._hide_hint_timer.setSingleShot(True)
         self._hide_hint_timer.timeout.connect(self._hide_signature_hint_if_away)
+        self._execution_repaint_timer = QTimer(self)
+        self._execution_repaint_timer.setSingleShot(True)
+        self._execution_repaint_timer.timeout.connect(self._apply_extra_selections)
         self._completer = self._build_completer()
         self._completer_mode = "command"
         self._signature_hint = ScriptSignatureHint(self)
         self._signature_hint.installEventFilter(self)
         self.blockCountChanged.connect(self._update_line_number_width)
         self.updateRequest.connect(self._update_line_number_area)
+        self.document().contentsChange.connect(self._on_contents_change)
         self.setMouseTracking(True)
         self.viewport().setMouseTracking(True)
         self.viewport().installEventFilter(self)
         self.cursorPositionChanged.connect(self._on_cursor_moved)
         self._update_line_number_width(0)
         self._highlight_current_line()
+
+    def refresh_line_number_area(self) -> None:
+        self._line_area.update()
+
+    # ------------------------------------------------------------------
+    # 断点：以 QTextBlockUserData 块标记为准，块随内容增删自动迁移。
+    # ------------------------------------------------------------------
+    def _block_has_breakpoint(self, block) -> bool:
+        data = block.userData()
+        return isinstance(data, _BreakpointData) and bool(getattr(data, "breakpoint", False))
+
+    def _set_block_breakpoint(self, block, enabled: bool) -> None:
+        if not block.isValid():
+            return
+        if enabled:
+            if not self._block_has_breakpoint(block):
+                block.setUserData(_BreakpointData())
+        elif isinstance(block.userData(), _BreakpointData):
+            block.setUserData(None)
+
+    def breakpoint_lines(self) -> set:
+        """返回当前带断点标记的全部行号（1 基）集合。"""
+        lines = set()
+        block = self.document().firstBlock()
+        while block.isValid():
+            if self._block_has_breakpoint(block):
+                lines.add(block.blockNumber() + 1)
+            block = block.next()
+        return lines
+
+    def _publish_breakpoints(self, *, force: bool) -> None:
+        lines = self.breakpoint_lines()
+        if not force and lines == self._breakpoint_snapshot:
+            return
+        self._breakpoint_snapshot = set(lines)
+        self.breakpoints_changed.emit(set(lines))
+
+    def toggle_breakpoint(self, line: int) -> bool:
+        block = self.document().findBlockByNumber(int(line) - 1)
+        if not block.isValid():
+            return False
+        enabled = not self._block_has_breakpoint(block)
+        self._set_block_breakpoint(block, enabled)
+        self._publish_breakpoints(force=True)
+        self.refresh_line_number_area()
+        return enabled
+
+    def set_breakpoint(self, line: int, enabled: bool = True) -> None:
+        block = self.document().findBlockByNumber(int(line) - 1)
+        if not block.isValid():
+            return
+        self._set_block_breakpoint(block, bool(enabled))
+        self._publish_breakpoints(force=True)
+        self.refresh_line_number_area()
+
+    def set_breakpoints(self, lines) -> None:
+        """用给定行号集合整体覆盖断点标记。"""
+        wanted = {int(line) for line in (lines or set())}
+        block = self.document().firstBlock()
+        while block.isValid():
+            want = (block.blockNumber() + 1) in wanted
+            if self._block_has_breakpoint(block) != want:
+                self._set_block_breakpoint(block, want)
+            block = block.next()
+        self._publish_breakpoints(force=True)
+        self.refresh_line_number_area()
+
+    def line_at_area_y(self, y: float) -> int:
+        """把行号区内的 y 坐标换算成 1 基行号；不在任何可见块内返回 0。"""
+        block = self.firstVisibleBlock()
+        top = self.blockBoundingGeometry(block).translated(self.contentOffset()).top()
+        bottom = top + self.blockBoundingRect(block).height()
+        target = float(y)
+        while block.isValid():
+            if block.isVisible() and top <= target <= bottom:
+                return block.blockNumber() + 1
+            block = block.next()
+            top = bottom
+            bottom = top + self.blockBoundingRect(block).height()
+        return 0
+
+    def _relocate_breakpoint_after_leading_split(self) -> None:
+        # 在断点行行首回车：Qt 把块标记留在上方新空行上，但用户是在断点行上方
+        # 插入空行，断点应随代码下移。把标记从空行搬到下面的代码块。
+        cursor = self.textCursor()
+        code_block = cursor.block()
+        empty_block = code_block.previous()
+        if (
+            empty_block.isValid()
+            and self._block_has_breakpoint(empty_block)
+            and not self._block_has_breakpoint(code_block)
+        ):
+            self._set_block_breakpoint(empty_block, False)
+            self._set_block_breakpoint(code_block, True)
+            self._publish_breakpoints(force=True)
+            self.refresh_line_number_area()
+
+    def set_execution_line(self, line) -> None:
+        """标记当前执行行（仅视觉高亮），80ms 合并重绘，不抢焦点、不居中。"""
+        self._execution_line = int(line) if line else None
+        timer = getattr(self, "_execution_repaint_timer", None)
+        if timer is not None and not timer.isActive():
+            timer.start(80)
+
+    def _on_contents_change(self, position: int, removed: int, added: int) -> None:
+        # 块标记随 QTextBlock 自动跟随内容增删；这里只在存在断点时把更新后的
+        # 断点行号集合原子地推给控制器，并重绘行号区。没有断点时零开销。
+        self._line_area.update()
+        if self._breakpoint_snapshot:
+            self._publish_breakpoints(force=False)
 
     def _build_completer(self) -> QCompleter:
         completer = QCompleter(self)
@@ -367,9 +513,17 @@ class ScriptCodeEdit(QPlainTextEdit):
         current = self.textCursor().blockNumber()
         width = self._line_area.width() - 8
         height = self.fontMetrics().height()
+        marker_color = QColor("#d9534f")
 
         while block.isValid() and top <= event.rect().bottom():
             if block.isVisible() and bottom >= event.rect().top():
+                if self._block_has_breakpoint(block):
+                    radius = max(3, height // 4)
+                    center_y = top + height // 2
+                    painter.setPen(Qt.PenStyle.NoPen)
+                    painter.setBrush(QBrush(marker_color))
+                    painter.drawEllipse(QPoint(radius + 2, center_y), radius, radius)
+                    painter.setBrush(Qt.BrushStyle.NoBrush)
                 painter.setPen(current_color if block_number == current else number_color)
                 painter.drawText(0, top, width, height, Qt.AlignmentFlag.AlignRight, str(block_number + 1))
             block = block.next()
@@ -395,11 +549,22 @@ class ScriptCodeEdit(QPlainTextEdit):
         if event.modifiers() & Qt.KeyboardModifier.ControlModifier and key == Qt.Key.Key_Space:
             self._update_completer_prefix(force=True)
             return
+        if event.modifiers() & Qt.KeyboardModifier.AltModifier and key == Qt.Key.Key_Slash:
+            self._update_completer_prefix(force=True)
+            return
         if key == Qt.Key.Key_Escape and self._signature_hint.isVisible():
             self._signature_hint.hide()
             return
         if key in {Qt.Key.Key_Return, Qt.Key.Key_Enter}:
+            cursor = self.textCursor()
+            relocate = (
+                not cursor.hasSelection()
+                and cursor.positionInBlock() == 0
+                and self._block_has_breakpoint(cursor.block())
+            )
             super().keyPressEvent(event)
+            if relocate:
+                self._relocate_breakpoint_after_leading_split()
             self._apply_auto_indent()
             self._refresh_signature_hint()
             return
@@ -411,20 +576,25 @@ class ScriptCodeEdit(QPlainTextEdit):
 
     def inputMethodEvent(self, event: QInputMethodEvent) -> None:
         commit = event.commitString()
-        converted = self._normalized_typed_text(commit)
-        if commit and converted != commit:
-            replacement = QInputMethodEvent(event.preeditString(), event.attributes())
-            replacement.setCommitString(converted, event.replacementStart(), event.replacementLength())
-            super().inputMethodEvent(replacement)
-            self._after_inserted_text(converted)
-            return
+        if commit and not self._caret_in_string_or_comment():
+            converted = self._normalized_typed_text(commit)
+            if converted != commit:
+                replacement = QInputMethodEvent(event.preeditString(), event.attributes())
+                replacement.setCommitString(converted, event.replacementStart(), event.replacementLength())
+                super().inputMethodEvent(replacement)
+                self._after_inserted_text(converted)
+                return
         super().inputMethodEvent(event)
         if commit:
-            self._after_inserted_text(converted)
+            self._after_inserted_text(commit)
 
     def insertFromMimeData(self, source) -> None:
         if source is not None and source.hasText():
-            text = normalize_script_punctuation(source.text())
+            text = source.text()
+            # 光标不在字符串/注释里才把整段的代码标点半角化；
+            # normalize_script_punctuation 本身会保留粘贴片段内部字符串里的标点。
+            if not self._caret_in_string_or_comment():
+                text = normalize_script_punctuation(text)
             self.insertPlainText(text)
             self._after_inserted_text(text)
             return
@@ -433,9 +603,49 @@ class ScriptCodeEdit(QPlainTextEdit):
     def _normalized_typed_text(self, text: str) -> str:
         return normalize_script_punctuation(text)
 
+    def _caret_open_quote(self):
+        """返回光标所在字符串的开引号：单行字符串返回半角 ``"`` 或 ``'``，注释返回
+        ``"#"``，三引号字符串返回 ``'\"\"\"'`` 或 ``"'''"``，都不在时返回 ``None``。"""
+        cursor = self.textCursor()
+        block = cursor.block()
+        column = cursor.positionInBlock()
+        line = block.text()
+        # 多行三引号字符串：语法高亮把未闭合状态写进上一块的 userState。
+        # 若上一块以三引号字符串结尾，本块起始即在字符串内；无该状态时退回单行判断。
+        previous = block.previous()
+        if previous.isValid():
+            state = previous.userState()
+            if state in (_STATE_TRIPLE_DOUBLE, _STATE_TRIPLE_SINGLE):
+                quote = '"""' if state == _STATE_TRIPLE_DOUBLE else "'''"
+                close = line.find(quote)
+                if close < 0 or column <= close + len(quote):
+                    return quote
+                tail_start = close + len(quote)
+                return string_open_quote(line[tail_start:], column - tail_start)
+        return string_open_quote(line, column)
+
+    def _caret_in_string_or_comment(self) -> bool:
+        """判断光标是否落在字符串或注释内，此时输入的标点应原样保留。"""
+        return self._caret_open_quote() is not None
+
     def _insert_normalized_punct(self, text: str) -> bool:
+        if not text:
+            return False
+        open_quote = self._caret_open_quote()
+        if open_quote is not None:
+            # 字符串/注释里原样保留；但正在“闭合当前字符串”的那个引号要半角化，
+            # 否则闭合引号残留全角，后续整行会被误判为仍在字符串内。
+            if (
+                open_quote in {'"', "'"}
+                and len(text) == 1
+                and map_script_punct_char(text) == open_quote
+            ):
+                self.insertPlainText(open_quote)
+                self._after_inserted_text(open_quote)
+                return True
+            return False
         converted = self._normalized_typed_text(text)
-        if not text or converted == text:
+        if converted == text:
             return False
         self.insertPlainText(converted)
         self._after_inserted_text(converted)
@@ -453,7 +663,15 @@ class ScriptCodeEdit(QPlainTextEdit):
             return False
         key = event.key()
         if key in {Qt.Key.Key_Enter, Qt.Key.Key_Return, Qt.Key.Key_Tab}:
-            current = self._completer.currentCompletion()
+            # 插入弹窗里高亮的那一行，而不是模型第 0 行。
+            index = popup.currentIndex()
+            current = ""
+            if index.isValid():
+                data = index.data(Qt.ItemDataRole.DisplayRole)
+                if data is not None:
+                    current = str(data)
+            if not current:
+                current = self._completer.currentCompletion()
             if current:
                 self._insert_completion(current)
             popup.hide()
@@ -679,14 +897,29 @@ class ScriptCodeEdit(QPlainTextEdit):
         self._refresh_signature_hint()
 
     def _highlight_current_line(self) -> None:
+        self._apply_extra_selections()
+
+    def _apply_extra_selections(self) -> None:
         from themes import theme_color
 
-        selection = QTextEdit.ExtraSelection()
-        selection.format.setBackground(QColor(theme_color("hover", "#3a3a3a" if self._dark else "#e8e8e8")))
-        selection.format.setProperty(QTextFormat.Property.FullWidthSelection, True)
-        selection.cursor = self.textCursor()
-        selection.cursor.clearSelection()
-        self.setExtraSelections([selection])
+        selections = []
+        current = QTextEdit.ExtraSelection()
+        current.format.setBackground(QColor(theme_color("hover", "#3a3a3a" if self._dark else "#e8e8e8")))
+        current.format.setProperty(QTextFormat.Property.FullWidthSelection, True)
+        current.cursor = self.textCursor()
+        current.cursor.clearSelection()
+        selections.append(current)
+        exec_line = getattr(self, "_execution_line", None)
+        if exec_line:
+            block = self.document().findBlockByNumber(int(exec_line) - 1)
+            if block.isValid():
+                marker = QTextEdit.ExtraSelection()
+                # 半透明琥珀色，覆盖在当前行高亮之上，主题无关。
+                marker.format.setBackground(QColor(255, 200, 0, 55))
+                marker.format.setProperty(QTextFormat.Property.FullWidthSelection, True)
+                marker.cursor = QTextCursor(block)
+                selections.append(marker)
+        self.setExtraSelections(selections)
         self._line_area.update()
 
     def _mouse_on_code_line(self) -> bool:

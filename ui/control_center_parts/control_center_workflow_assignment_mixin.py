@@ -14,6 +14,15 @@ from utils.app_paths import get_workflows_dir
 logger = logging.getLogger(__name__)
 
 
+def drop_assigned_workflow(workflows: List[Dict[str, Any]], index: int) -> List[Dict[str, Any]]:
+    items = [item for item in (workflows or []) if isinstance(item, dict)]
+    if index < 0 or index >= len(items):
+        raise ValueError("工作流序号无效")
+    remaining = list(items)
+    remaining.pop(index)
+    return remaining
+
+
 class ControlCenterWorkflowAssignmentMixin:
     def _select_workflow_files(self, title: str):
         file_paths, _ = QFileDialog.getOpenFileNames(
@@ -140,6 +149,111 @@ class ControlCenterWorkflowAssignmentMixin:
             return
         window_title = str(window_info.get('title', '未知窗口'))
         self._assign_workflow_files_to_rows([row], f"为窗口 '{window_title}' 选择工作流", f"窗口 {window_title}")
+
+    def remove_workflow_from_window(self, row):
+        """Remove all workflows assigned to one window and persist the change."""
+        return self._remove_workflow_assignments([row], "该窗口")
+
+    def remove_window_workflow_at(self, row: int, index: int) -> bool:
+        window_info = self._get_row_window_info(row)
+        if not window_info:
+            return False
+        window_id = self._window_runtime_id(window_info, row)
+        if not window_id:
+            return False
+        scheduler = getattr(self, "scheduler", None)
+        snapshot = scheduler.snapshot(window_id) if scheduler is not None else None
+        if snapshot is not None and snapshot.is_active:
+            QMessageBox.warning(self, "无法移除", "该窗口的工作流正在运行，请先停止任务")
+            return False
+        workflows = self._get_window_workflows(window_id)
+        try:
+            remaining = drop_assigned_workflow(workflows, index)
+        except ValueError as exc:
+            QMessageBox.warning(self, "无法移除", str(exc))
+            return False
+        removed = workflows[index]
+        removed_name = str(removed.get("name") or os.path.basename(str(removed.get("file_path") or "")) or "工作流")
+        reply = QMessageBox.question(
+            self,
+            "移除工作流",
+            f"确定移除「{removed_name}」吗？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return False
+        self.window_workflows[window_id] = remaining
+        self._refresh_window_workflow_cell(row, window_id)
+        self._save_workflow_config()
+        self.on_selection_changed()
+        self.log_message(f"已移除窗口工作流：{removed_name}")
+        return True
+
+    def remove_workflows_from_selected(self):
+        """Remove all workflows assigned to the selected windows."""
+        return self._remove_workflow_assignments(self._get_selected_rows(), "选中窗口")
+
+    def remove_workflows_from_all(self):
+        """Remove all workflows assigned to every window."""
+        return self._remove_workflow_assignments(self._get_all_rows(), "全部窗口")
+
+    def _remove_workflow_assignments(self, rows: List[int], scope_label: str):
+        if not rows:
+            QMessageBox.information(self, "提示", "请先选择目标窗口")
+            return False
+        targets = []
+        active_titles = []
+        total_workflows = 0
+        scheduler = getattr(self, "scheduler", None)
+        for row in rows:
+            window_info = self._get_row_window_info(row)
+            if not window_info:
+                continue
+            window_id = self._window_runtime_id(window_info, row)
+            if not window_id:
+                continue
+            workflows = self._get_window_workflows(window_id)
+            if not workflows:
+                continue
+            snapshot = scheduler.snapshot(window_id) if scheduler is not None else None
+            window_title = str(window_info.get("title") or "未知窗口")
+            if snapshot is not None and snapshot.is_active:
+                active_titles.append(window_title)
+                continue
+            targets.append((row, window_id, window_title, len(workflows)))
+            total_workflows += len(workflows)
+
+        if active_titles:
+            QMessageBox.warning(
+                self,
+                "无法移除",
+                "以下窗口的工作流正在运行，请先停止任务：\n" + "、".join(active_titles[:8]),
+            )
+            return False
+        if not targets:
+            QMessageBox.information(self, "提示", "选中的窗口当前没有可移除的工作流")
+            return False
+
+        reply = QMessageBox.question(
+            self,
+            "移除工作流",
+            f"确定移除{scope_label}的 {total_workflows} 个已分配工作流吗？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return False
+
+        for row, window_id, _window_title, _count in targets:
+            # AssignmentMap returns a copy from _get_window_workflows; assign
+            # through the mapping so scheduler state is updated as well.
+            self.window_workflows[window_id] = []
+            self._refresh_window_workflow_cell(row, window_id)
+        self._save_workflow_config()
+        self.on_selection_changed()
+        self.log_message(f"已移除 {len(targets)} 个窗口的 {total_workflows} 个工作流")
+        return True
 
 
 

@@ -25,6 +25,8 @@ from PySide6.QtWidgets import (
 
 from ui.dialogs.script_resources import (
     AUDIO_EXTS,
+    COMPONENT_EXTS,
+    IMAGE_EXTS,
     MODEL_EXTS,
     delete_resource_file,
     import_resource_file,
@@ -34,13 +36,33 @@ from ui.dialogs.script_resources import (
     rewrite_resource_literal,
 )
 from ui.system_parts.menu_style import apply_unified_menu_style
-from utils.app_paths import get_sounds_dir
+from utils.app_paths import get_app_root, get_plugin_dir, get_sounds_dir
 
 _IMAGE_FILTER = "图片 (*.bmp *.png *.jpg *.jpeg *.webp)"
 _MODEL_FILTER = "模型 (*.onnx)"
 _AUDIO_FILTER = "音频 (*.wav *.mp3 *.wma *.m4a *.ogg *.flac)"
 _REPLAY_FILTER = "回放 (*.replay.json)"
-_IMPORT_FILTER = f"{_IMAGE_FILTER};;{_MODEL_FILTER};;{_AUDIO_FILTER};;{_REPLAY_FILTER};;所有文件 (*.*)"
+_COMPONENT_FILTER = "外部组件 (*.dll *.exe *.py)"
+_IMPORT_FILTER = f"{_IMAGE_FILTER};;{_MODEL_FILTER};;{_AUDIO_FILTER};;{_REPLAY_FILTER};;{_COMPONENT_FILTER};;所有文件 (*.*)"
+
+
+def _detect_import_kind(path: str, selected_filter: str) -> str:
+    """按所选过滤器和扩展名判定资源类型；无法识别时抛 ValueError。"""
+    name = str(path or "").lower()
+    selected = str(selected_filter or "")
+    # 回放文件名是 *.replay.json，扩展名是 .json，必须先于图片/其它判定。
+    if selected.startswith("回放") or name.endswith(".replay.json"):
+        return "replay"
+    ext = os.path.splitext(name)[1]
+    if selected.startswith("模型") or ext in MODEL_EXTS:
+        return "model"
+    if selected.startswith("音频") or ext in AUDIO_EXTS:
+        return "audio"
+    if selected.startswith("外部组件") or ext in COMPONENT_EXTS:
+        return "component"
+    if selected.startswith("图片") or ext in IMAGE_EXTS:
+        return "image"
+    raise ValueError("不支持的资源类型")
 
 
 class ScriptResourcePanel(QWidget):
@@ -56,6 +78,10 @@ class ScriptResourcePanel(QWidget):
         self.setMaximumHeight(240)
         self._images_dir = ""
         self._sounds_dir = ""
+        self._dicts_dir = ""
+        self._yolo_dir = ""
+        self._replays_dir = ""
+        self._plugins_dir = ""
         self._card_id: Optional[int] = None
         self._workflow_token = ""
         self._items: List[Dict[str, Any]] = []
@@ -68,11 +94,32 @@ class ScriptResourcePanel(QWidget):
         card_id: Optional[int] = None,
         workflow_token: str = "",
         sounds_dir: str = "",
+        dicts_dir: str = "",
+        yolo_dir: str = "",
+        replays_dir: str = "",
+        plugins_dir: str = "",
     ) -> None:
-        self._images_dir = str(images_dir or "")
-        self._sounds_dir = str(sounds_dir or "").strip() or get_sounds_dir("LCA")
+        from task_workflow.resource_context import bind_resource_dirs, current_resource_dirs
+
+        current = current_resource_dirs()
+        self._images_dir = str(images_dir or "") or current["images_dir"]
+        self._sounds_dir = str(sounds_dir or "").strip() or current["sounds_dir"] or get_sounds_dir("LCA")
+        self._dicts_dir = str(dicts_dir or "").strip() or current["dicts_dir"]
+        self._yolo_dir = str(yolo_dir or "").strip() or current["yolo_dir"]
+        self._replays_dir = str(replays_dir or "").strip() or current["replays_dir"]
+        self._plugins_dir = get_plugin_dir()
         self._card_id = card_id
         self._workflow_token = str(workflow_token or "")
+        bind_resource_dirs(
+            {
+                "images_dir": self._images_dir,
+                "sounds_dir": self._sounds_dir,
+                "dicts_dir": self._dicts_dir,
+                "yolo_dir": self._yolo_dir,
+                "replays_dir": self._replays_dir,
+                "plugins_dir": self._plugins_dir,
+            }
+        )
 
     def set_source(self, source: str) -> None:
         self._source = str(source or "")
@@ -86,6 +133,10 @@ class ScriptResourcePanel(QWidget):
             self._card_id,
             self._workflow_token,
             self._sounds_dir,
+            dicts_dir=self._dicts_dir,
+            yolo_dir=self._yolo_dir,
+            replays_dir=self._replays_dir,
+            plugins_dir=self._plugins_dir,
         )
         self._list.clear()
         current = None
@@ -119,10 +170,15 @@ class ScriptResourcePanel(QWidget):
         title = QLabel("本卡资源")
         title.setObjectName("scriptResourceTitle")
         layout.addWidget(title)
-        hint = QLabel("截图、导入的图、模型和音频都在这里。双击插入到当前行。")
+        hint = QLabel("截图及导入的图、模型、音频和组件都在这里。双击插入到当前行。")
         hint.setObjectName("scriptResourceHint")
         hint.setWordWrap(True)
         layout.addWidget(hint)
+        status = QLabel("")
+        status.setObjectName("scriptResourceStatus")
+        status.setWordWrap(True)
+        layout.addWidget(status)
+        self._status = status
         empty = QLabel("这张卡还没有资源。用上面的「截图」或「导入」。")
         empty.setObjectName("scriptResourceEmpty")
         empty.setWordWrap(True)
@@ -162,7 +218,7 @@ class ScriptResourcePanel(QWidget):
         layout.addLayout(row)
 
     def _item_label(self, item: Dict[str, Any]) -> str:
-        kind = {"model": "模型", "audio": "音频", "replay": "回放"}.get(str(item.get("kind") or ""), "图片")
+        kind = {"model": "模型", "audio": "音频", "replay": "回放", "component": "组件"}.get(str(item.get("kind") or ""), "图片")
         name = str(item.get("name") or item.get("path") or "")
         if not item.get("exists"):
             state = "文件不在"
@@ -224,18 +280,17 @@ class ScriptResourcePanel(QWidget):
         path, selected = QFileDialog.getOpenFileName(
             self,
             "导入资源",
-            self._images_dir or self._sounds_dir or "",
+            self._images_dir or self._sounds_dir or self._yolo_dir or "",
             _IMPORT_FILTER,
         )
         if not path:
             return
-        ext = os.path.splitext(path)[1].lower()
-        if selected.startswith("模型") or ext in MODEL_EXTS:
-            kind = "model"
-        elif selected.startswith("音频") or ext in AUDIO_EXTS:
-            kind = "audio"
-        else:
-            kind = "image"
+        try:
+            kind = _detect_import_kind(path, selected)
+        except ValueError as exc:
+            self._status.setText(f"导入失败：{exc}")
+            QMessageBox.warning(self, "导入", f"导入失败：{exc}")
+            return
         try:
             imported = import_resource_file(
                 path,
@@ -244,17 +299,37 @@ class ScriptResourcePanel(QWidget):
                 self._workflow_token,
                 kind,
                 self._sounds_dir,
+                dicts_dir=self._dicts_dir,
+                yolo_dir=self._yolo_dir,
+                replays_dir=self._replays_dir,
+                plugins_dir=self._plugins_dir,
             )
         except Exception as exc:
+            self._status.setText(f"导入失败：{exc}")
             QMessageBox.warning(self, "导入", f"导入失败：{exc}")
             return
         self.reload()
-        self._select_path(str(imported.get("path") or ""))
+        imported_path = str(imported.get("path") or "")
+        if not self._select_path(imported_path):
+            row = QListWidgetItem(self._item_label(imported))
+            row.setData(Qt.ItemDataRole.UserRole, imported)
+            row.setToolTip(self._item_tip(imported))
+            icon = self._item_icon(imported)
+            if icon is not None:
+                row.setIcon(icon)
+            self._list.addItem(row)
+            self._items.append(imported)
+            self._list.setCurrentItem(row)
+            self._empty.setVisible(False)
+            self._list.setVisible(True)
+            self._sync_buttons()
+        self._status.setText(f"已导入：{imported.get('name') or imported.get('path') or ''}。双击资源或点击“插入”写入当前行。")
 
     def _on_insert(self) -> None:
         item = self.current_item()
         if item:
             self.insert_requested.emit(item)
+            self._status.setText(f"已插入：{item.get('name') or item.get('path') or ''}")
 
     def _on_locate(self) -> None:
         item = self.current_item()
@@ -267,13 +342,16 @@ class ScriptResourcePanel(QWidget):
             return
         if item.get("kind") == "model":
             filt = f"{_MODEL_FILTER};;所有文件 (*.*)"
-            start = self._images_dir or ""
+            start = self._yolo_dir or os.path.join(get_app_root(), "yolo")
         elif item.get("kind") == "audio":
             filt = f"{_AUDIO_FILTER};;所有文件 (*.*)"
             start = self._sounds_dir or ""
         elif item.get("kind") == "replay":
             filt = f"{_REPLAY_FILTER};;所有文件 (*.*)"
-            start = self._images_dir or ""
+            start = self._replays_dir or os.path.join(get_app_root(), "replays")
+        elif item.get("kind") == "component":
+            filt = f"{_COMPONENT_FILTER};;所有文件 (*.*)"
+            start = get_plugin_dir()
         else:
             filt = f"{_IMAGE_FILTER};;所有文件 (*.*)"
             start = self._images_dir or ""
@@ -358,11 +436,12 @@ class ScriptResourcePanel(QWidget):
         box.addWidget(label)
         dialog.exec()
 
-    def _select_path(self, path: str) -> None:
+    def _select_path(self, path: str) -> bool:
         needle = str(path or "")
         for index in range(self._list.count()):
             row = self._list.item(index)
             payload = row.data(Qt.ItemDataRole.UserRole) if row is not None else None
             if isinstance(payload, dict) and payload.get("path") == needle:
                 self._list.setCurrentRow(index)
-                return
+                return True
+        return False

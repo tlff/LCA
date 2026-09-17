@@ -11,6 +11,7 @@ class MainWindowActionsMixin:
     def _create_actions(self):
         """Creates all QAction instances."""
         from .main_window_support import (
+            create_ai_toolbar_icon,
             create_copy_toolbar_icon,
             create_export_standalone_icon,
             create_hourglass_icon,
@@ -75,6 +76,10 @@ class MainWindowActionsMixin:
         self.global_settings_action.setToolTip("配置目标窗口、执行模式和自定义分辨率等全局选项")
         self.global_settings_action.triggered.connect(self.open_global_settings)
 
+        self.ai_workflow_action = QAction(create_ai_toolbar_icon(icon_size), "AI 助手", self)
+        self.ai_workflow_action.setToolTip("用 AI 生成卡片、连线或自定义脚本，校验通过后立刻显示到画布")
+        self.ai_workflow_action.triggered.connect(self.open_ai_workflow_assistant)
+
         self.timer_action = QAction(create_hourglass_icon(icon_size), "定时设置", self)
         self.timer_action.setToolTip("定时停止 - 设置定时器，时间到后自动停止所有工作流")
         self.timer_action.triggered.connect(self.open_timer_dialog)
@@ -94,6 +99,7 @@ class MainWindowActionsMixin:
     def _refresh_theme_sensitive_action_icons(self):
         """刷新标题栏中依赖主题色的动作图标。"""
         from .main_window_support import (
+            create_ai_toolbar_icon,
             create_export_standalone_icon,
             create_hourglass_icon,
             create_media_control_icon,
@@ -114,6 +120,7 @@ class MainWindowActionsMixin:
             ("export_standalone_action", lambda: create_export_standalone_icon(icon_size)),
             ("debug_run_action", lambda: create_monitor_toolbar_icon(icon_size)),
             ("global_settings_action", lambda: create_settings_toolbar_icon(icon_size)),
+            ("ai_workflow_action", lambda: create_ai_toolbar_icon(icon_size)),
             ("timer_action", lambda: create_hourglass_icon(icon_size)),
         )
         for attr, factory in mapping:

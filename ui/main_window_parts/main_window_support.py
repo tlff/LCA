@@ -465,6 +465,47 @@ def create_settings_toolbar_icon(size: int = 22) -> QIcon:
     return _build_modern_line_icon(size, draw)
 
 
+def _sparkle_path(cx: float, cy: float, outer: float, inner: float) -> QPainterPath:
+    """四角星芒路径：与齿轮同属闭合折线描边。"""
+    path = QPainterPath()
+    for i in range(8):
+        ang = -math.pi / 2 + i * (math.pi / 4)
+        radius = outer if i % 2 == 0 else inner
+        x = cx + math.cos(ang) * radius
+        y = cy + math.sin(ang) * radius
+        if i == 0:
+            path.moveTo(x, y)
+        else:
+            path.lineTo(x, y)
+    path.closeSubpath()
+    return path
+
+
+def create_ai_toolbar_icon(size: int = 22) -> QIcon:
+    """AI 助手：主星芒 + 右上辅星，沿用工具栏统一细线。"""
+
+    def draw(painter: QPainter, px: int, color: QColor):
+        a = _line_content_rect(px)
+        span = min(a.width(), a.height())
+        main_r = span * 0.36
+        painter.drawPath(
+            _sparkle_path(
+                a.left() + a.width() * 0.38,
+                a.top() + a.height() * 0.58,
+                main_r,
+                main_r * 0.40,
+            )
+        )
+        # 辅星用短十字，22px 下比缩小四角星更清晰。
+        sub_r = span * 0.15
+        sub_cx = a.left() + a.width() * 0.82
+        sub_cy = a.top() + a.height() * 0.18
+        painter.drawLine(QPointF(sub_cx, sub_cy - sub_r), QPointF(sub_cx, sub_cy + sub_r))
+        painter.drawLine(QPointF(sub_cx - sub_r, sub_cy), QPointF(sub_cx + sub_r, sub_cy))
+
+    return _build_modern_line_icon(size, draw)
+
+
 def create_window_topmost_icon(size: int = 16) -> QIcon:
     """置顶：顶栏 + 上箭头。"""
 

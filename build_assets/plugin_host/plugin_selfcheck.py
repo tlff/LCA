@@ -2,10 +2,10 @@
 """大漠插件真机自检。
 
   python build_assets/plugin_host/plugin_selfcheck.py --no-auth
-      只查运行库文件、架构、宿主拉起 / 管道协议 / 退出。不联网，不消耗注册次数。
+      只查运行库文件、架构、宿主拉起 / 管道协议 / 退出。
 
   python build_assets/plugin_host/plugin_selfcheck.py --title "窗口标题" [--title ...] [--hwnd 123456 ...]
-      用配置里的注册码起共享宿主（1 次 Reg），对每个窗口依次：按当前插件参数试绑 → IsBind 核实 →
+      用配置里的注册码起共享宿主（免注册加载 + 1 次 Reg），对每个窗口依次：按当前插件参数试绑 → IsBind 核实 →
       读客户区尺寸 → MoveTo(0,0)（只移动不点击）→ 解绑；最后打印宿主对象池统计。
       期望：累计注册次数 == 窗口数（每个窗口一个 dm 对象，解绑后回池不重复注册）。
 """

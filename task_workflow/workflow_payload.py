@@ -4,6 +4,7 @@ import copy
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
+from app_core.lca_format.constants import LCA_EXTENSION
 from app_core.lca_format.project_io import is_lca_path, load_lca_project, save_lca_project
 from task_workflow.thread_start import THREAD_START_TASK_TYPE, is_thread_start_task_type
 from task_workflow.workflow_sanitize import sanitize_card_parameters
@@ -107,32 +108,69 @@ def load_workflow_json(path: str | Path) -> Dict[str, Any]:
     return payload
 
 
-def load_workflow_file(path: str | Path) -> Dict[str, Any]:
+def _memory_workflow_bytes(
+    path_text: str,
+    parent_workflow_file: str | Path | None = None,
+) -> bytes:
+    from app_core.lca_format.project_io import ensure_registered_lca_session, is_lca_path
+    from app_core.lca_format.session import get_active, get_for_path
+
+    parent_text = str(parent_workflow_file or "").strip()
+    session = None
+    if parent_text and not parent_text.startswith("memory://"):
+        session = get_for_path(parent_text)
+        if session is None and is_lca_path(parent_text):
+            session = ensure_registered_lca_session(parent_text)
+        if session is None and is_lca_path(parent_text):
+            raise FileNotFoundError(f"父工程不存在: {parent_text}")
+    if session is None:
+        session = get_active()
+    if session is not None:
+        payload_bytes = session.get_bytes(path_text)
+        if payload_bytes is not None:
+            return payload_bytes
+        if parent_text and not parent_text.startswith("memory://"):
+            raise FileNotFoundError(f"包内工作流文件不存在: {path_text}")
+    from app_core.player.memory_store import get_player_memory_file
+
+    player_bytes = get_player_memory_file(path_text)
+    if player_bytes is None:
+        raise FileNotFoundError(f"包内工作流文件不存在: {path_text}")
+    return player_bytes
+
+
+def load_workflow_package(
+    path: str | Path,
+    *,
+    parent_workflow_file: str | Path | None = None,
+):
+    from app_core.lca_format.container import LcaFormatError
+    from app_core.lca_format.project_io import load_lca_from_bytes
+
     path_text = str(path)
     if path_text.startswith("memory://"):
-        import json
+        return load_lca_from_bytes(_memory_workflow_bytes(path_text, parent_workflow_file))
+    if not is_lca_path(path_text):
+        raise LcaFormatError("工作流必须是 .lca 工程")
+    return load_lca_project(path_text)
 
-        from app_core.lca_format.session import get_active
 
-        session = get_active()
-        payload_bytes = session.get_bytes(path_text) if session is not None else None
-        if payload_bytes is None:
-            raise FileNotFoundError(f"包内工作流文件不存在: {path_text}")
-        payload = json.loads(payload_bytes.decode("utf-8"))
-        if not isinstance(payload, dict):
-            raise TypeError("工作流文件根节点必须是对象")
-        return payload
-    if is_lca_path(path):
+def load_workflow_file(
+    path: str | Path,
+    *,
+    parent_workflow_file: str | Path | None = None,
+) -> Dict[str, Any]:
+    path_text = str(path)
+    payload, session = load_workflow_package(
+        path_text,
+        parent_workflow_file=parent_workflow_file,
+    )
+    if not path_text.startswith("memory://"):
         from app_core.lca_format.session import activate, register
 
-        payload, session = load_lca_project(path)
-        register(path, session)
-        activate(path)
-        return payload
-    from app_core.lca_format.session import deactivate
-
-    deactivate()
-    return load_workflow_json(path)
+        register(path_text, session)
+        activate(path_text)
+    return payload
 
 
 def save_workflow_file(path: str | Path, data: dict) -> Path:

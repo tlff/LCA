@@ -56,7 +56,9 @@ def _window_title(hwnd: Optional[int]) -> str:
 def _load_library(params: Dict[str, Any]):
     from services.dict_ocr_service import load_dict_library
 
-    dict_file = str(params.get("dict_file") or "").strip()
+    from task_workflow.resource_path import unwrap_resource_path
+
+    dict_file = unwrap_resource_path(params.get("dict_file")) or ""
     if not dict_file:
         raise ValueError("未选择字库文件")
     return load_dict_library(dict_file)

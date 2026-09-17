@@ -32,6 +32,15 @@ def main_window_safe_stop_tasks(ctx):
 
     try:
 
+        panel = getattr(self, "param_panel", None) or getattr(self, "parameter_panel", None)
+        stop_replay = getattr(panel, "stop_test_replay", None)
+        if callable(stop_replay):
+            try:
+                if stop_replay():
+                    logger.info("已停止测试回放")
+            except Exception as replay_err:
+                logger.warning("停止测试回放失败: %s", replay_err)
+
         if hasattr(self, 'task_state_manager') and self.task_state_manager:
 
             try:

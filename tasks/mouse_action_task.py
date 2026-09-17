@@ -26,19 +26,9 @@ from .task_utils import (
 )
 from .click_action_executor import execute_simulator_click_action
 from .click_param_resolver import resolve_click_params, normalize_button
-from .multi_image_memory import (
-    as_path_set,
-    finish_multi_image_round,
-    mark_multi_image_round_active,
-    resolve_multi_image_flag,
-    resolve_multi_image_remaining,
-)
+
 from utils.input.relative_mouse_move import perform_timed_relative_move as _shared_perform_timed_relative_move
 from utils.match.smart_image_matcher import normalize_match_image
-from utils.input.input_timing import (
-    DEFAULT_CLICK_HOLD_SECONDS,
-    DEFAULT_DOUBLE_CLICK_INTERVAL_SECONDS,
-)
 from tasks.mouse_action_params import get_params_definition  # 任务契约的一部分，供参数面板读取
 
 # 导入截图助手和驱动（方案三：保留截图，移除输入操作）
@@ -432,287 +422,14 @@ def _execute_multi_image_click(params: Dict[str, Any], execution_mode: str, targ
                               card_id: Optional[int], get_image_data, on_success_action: str,
                               success_jump_id: Optional[int], on_failure_action: str,
                               failure_jump_id: Optional[int], stop_checker=None) -> Tuple[bool, str, Optional[int]]:
-    """执行多找图功能"""
-    import time  # 确保time模块可用
+    """多图识别：只走并行匹配，不做预处理。"""
+    from tasks.optimized_multi_image_click import execute_multi_image_click_optimized
+    return execute_multi_image_click_optimized(
+        params, execution_mode, target_hwnd, card_id, get_image_data,
+        on_success_action, success_jump_id, on_failure_action, failure_jump_id,
+        stop_checker=stop_checker,
+    )
 
-    # 检查是否启用并行识别优化
-    enable_parallel = resolve_multi_image_flag(params, 'enable_parallel_recognition', True)
-
-    if enable_parallel:
-        try:
-            # 使用优化的并行识别模块
-            from tasks.optimized_multi_image_click import execute_multi_image_click_optimized
-            logger.info("[多图识别] 使用并行识别优化模式")
-            return execute_multi_image_click_optimized(
-                params, execution_mode, target_hwnd, card_id, get_image_data,
-                on_success_action, success_jump_id, on_failure_action, failure_jump_id,
-                stop_checker=stop_checker
-            )
-        except ImportError as e:
-            logger.warning(f"[多图识别] 并行识别模块不可用，回退到传统模式: {e}")
-        except Exception as e:
-            logger.error(f"[多图识别] 并行识别执行失败，回退到传统模式: {e}")
-
-    # 传统串行识别模式（原有逻辑）
-    logger.info("[多图识别] 使用传统串行识别模式")
-    try:
-        from task_workflow.workflow_context import get_workflow_context
-        from tasks.image_match_click import execute_task as execute_image_click
-        import os
-
-        context = get_workflow_context()
-
-        # 获取参数
-        from task_workflow.resource_path import format_resource_text
-
-        image_paths_text = format_resource_text(params.get('image_paths', ''))
-        click_all_found = resolve_multi_image_flag(params, 'click_all_found', False)
-        clear_clicked_on_next_run = resolve_multi_image_flag(params, 'clear_clicked_on_next_run', False)
-
-        if not image_paths_text:
-            logger.error("多图识别模式下未配置图片路径")
-            return _handle_failure(on_failure_action, failure_jump_id, card_id)
-
-        # 解析图片路径列表
-        raw_image_paths = [path.strip() for path in image_paths_text.split('\n') if path.strip()]
-        if not raw_image_paths:
-            logger.error("多图识别模式下图片路径列表为空")
-            return _handle_failure(on_failure_action, failure_jump_id, card_id)
-
-        # 智能纠正图片路径
-        image_paths = _correct_image_paths(raw_image_paths)
-        if not image_paths:
-            logger.error("多图识别模式下所有图片路径都无效")
-            # 显示错误对话框提示用户
-            _show_no_images_found_dialog(raw_image_paths)
-            return _handle_failure(on_failure_action, failure_jump_id, card_id)
-
-        logger.info(f"[多图识别] 开始执行，共{len(image_paths)}张图片，全部点击: {click_all_found}")
-
-        remaining_images = resolve_multi_image_remaining(
-            image_paths,
-            card_id,
-            click_all_found,
-            context,
-            clear_clicked_on_next_run=clear_clicked_on_next_run,
-        )
-        clicked_images = as_path_set(context.get_card_data(card_id, 'clicked_images', set()))
-        logger.info(f"[多图识别] 已点击图片记录: {len(clicked_images)}张，本轮待识别: {len(remaining_images)}张")
-
-        if not remaining_images:
-            logger.error("多图识别模式下没有可处理的图片")
-            finish_multi_image_round(context, card_id)
-            return _handle_failure(on_failure_action, failure_jump_id, card_id)
-
-        # 尝试识别和点击图片
-        found_images = []
-        clicked_count = 0
-
-        for i, image_path in enumerate(remaining_images):
-            # 构建单个图片的参数
-            # 支持多图专用参数名
-            use_region = (
-                coerce_bool(params.get('use_recognition_region', False)) or
-                coerce_bool(params.get('multi_use_recognition_region', False))
-            )
-            region_x = params.get('multi_recognition_region_x', params.get('recognition_region_x', 0))
-            region_y = params.get('multi_recognition_region_y', params.get('recognition_region_y', 0))
-            region_w = params.get('multi_recognition_region_width', params.get('recognition_region_width', 0))
-            region_h = params.get('multi_recognition_region_height', params.get('recognition_region_height', 0))
-
-            single_image_params = {
-                'image_path': image_path,
-                'confidence': params.get('confidence', 0.8),
-                'preprocessing_method': params.get('preprocessing_method', '无'),
-                'enable_click': coerce_bool(params.get('image_enable_click', True)),
-                'image_position_mode': params.get('image_position_mode', '精准坐标'),  # 关键：传递位置模式
-                'fixed_offset_x': params.get('image_fixed_offset_x', 0),
-                'fixed_offset_y': params.get('image_fixed_offset_y', 0),
-                'random_offset_x': params.get('image_random_offset_x', 5),
-                'random_offset_y': params.get('image_random_offset_y', 5),
-                'button': params.get('button', '左键'),
-                'clicks': params.get('clicks', 1),
-                'interval': params.get('interval', DEFAULT_DOUBLE_CLICK_INTERVAL_SECONDS),
-                'enable_retry': params.get('enable_retry', False),
-                'retry_attempts': params.get('retry_attempts', 3),
-                'retry_interval': params.get('retry_interval', 0.5),
-                # 【修复】添加识别区域参数（统一使用单图参数名传递给image_match_click）
-                'use_recognition_region': use_region,
-                'recognition_region_x': region_x,
-                'recognition_region_y': region_y,
-                'recognition_region_width': region_w,
-                'recognition_region_height': region_h,
-                'on_success': '执行下一步',  # 内部处理，不跳转
-                'success_jump_target_id': None,
-                'on_failure': '执行下一步',  # 内部处理，不跳转
-                'failure_jump_target_id': None
-            }
-
-            # 显示图片名称
-            if image_path.startswith('memory://'):
-                image_name = image_path.replace('memory://', '')
-            else:
-                image_name = os.path.basename(image_path) if image_path else f'图片{i+1}'
-
-            logger.info(f"[多图识别] 尝试识别第{i+1}张图片: {image_name}")
-
-            # 添加详细调试日志
-            logger.debug("[多图识别调试] 调用execute_image_click参数:")
-            logger.debug(f"  - image_path: {single_image_params.get('image_path')}")
-            logger.debug(f"  - execution_mode: {execution_mode}")
-            logger.debug(f"  - target_hwnd: {target_hwnd}")
-            logger.debug(f"  - button: {single_image_params.get('button')}")
-            logger.debug(f"  - clicks: {single_image_params.get('clicks')}")
-
-            # 执行单张图片的识别和点击
-            result = execute_image_click(
-                single_image_params,
-                {},
-                execution_mode,
-                target_hwnd,
-                None,
-                card_id,
-                get_image_data=get_image_data,
-                stop_checker=stop_checker,
-            )
-
-            # 【防御性编程】检查返回值是否为 None，防止解包错误
-            if result is None:
-                logger.error(f"[多图识别] 找图功能模块返回了 None，图片: {image_name}")
-                continue  # 跳过这张图片，尝试下一张
-
-            success, action, next_id = result
-
-            # 添加返回值调试日志
-            logger.debug("[多图识别调试] execute_image_click返回值:")
-            logger.debug(f"  - success: {success}")
-            logger.debug(f"  - action: {action}")
-            logger.debug(f"  - next_id: {next_id}")
-
-            if success:
-                logger.info(f"[多图识别] 第{i+1}张图片识别并点击成功: {image_name}")
-                found_images.append(image_path)
-                clicked_images.add(image_path)
-                clicked_count += 1
-
-                # 确保点击操作完成：添加适当延迟
-                click_completion_delay = max(0.2, params.get('interval', 0.1))  # 增加最小延迟到200ms
-                logger.debug(f"[多图识别] 等待点击操作完成，延迟{click_completion_delay}秒")
-                precise_sleep(click_completion_delay)
-
-                # 额外验证点击是否真正完成（针对模拟器和后台模式）
-                if (execution_mode.startswith('background') or execution_mode.startswith('emulator_')) and target_hwnd:
-                    # 后台窗口标准延迟
-                    additional_delay = 0.1
-                    logger.debug(f"[多图识别] 后台窗口响应时间，延迟{additional_delay}秒")
-                    precise_sleep(additional_delay)
-
-                # 更新已点击记录
-                context.set_card_data(card_id, 'clicked_images', clicked_images)
-
-                # 记录成功的图片（用于最终判断）
-                success_images = as_path_set(context.get_card_data(card_id, 'success_images', set()))
-                success_images.add(image_path)
-                context.set_card_data(card_id, 'success_images', success_images)
-
-                # 用户自定义的每张图片识别延迟
-                multi_image_delay = params.get('multi_image_delay', 1.0)
-                if multi_image_delay > 0:
-                    logger.debug(f"[多图识别] 用户自定义延迟，延迟{multi_image_delay}秒")
-                    precise_sleep(multi_image_delay)
-
-                if not click_all_found:
-                    # 未启用全部点击：找到第一张成功的就完成任务，清除记忆
-                    logger.info("[多图识别] 未启用全部点击，已点击第一张成功识别的图片，任务完成")
-                    finish_multi_image_round(context, card_id)
-                    return _handle_success(on_success_action, success_jump_id, card_id)
-            else:
-                logger.info(f"[多图识别] 第{i+1}张图片识别失败: {image_name}")
-                if not click_all_found:
-                    # 未启用全部点击：失败的图片加入已点击记录，避免无限重试
-                    clicked_images.add(image_path)
-                    context.set_card_data(card_id, 'clicked_images', clicked_images)
-                # 启用全部点击：失败的图片不加入clicked_images，下次可以重新尝试
-
-            # 在处理下一张图片前添加小延迟，确保当前操作完全完成
-            if i < len(remaining_images) - 1:  # 不是最后一张图片
-                # 图片间延迟
-                inter_image_delay = 0.05
-                logger.debug(f"[多图识别] 图片间延迟{inter_image_delay}秒")
-                precise_sleep(inter_image_delay)
-
-        # 处理结果
-        if click_all_found:
-            # 启用全部点击模式
-            if found_images:
-                # 本轮有图片成功
-                # 检查是否还有未成功的图片（基于success_images而非clicked_images）
-                all_success_images = as_path_set(context.get_card_data(card_id, 'success_images', set()))
-                remaining_after_click = [path for path in image_paths if path not in all_success_images]
-                if remaining_after_click:
-                    logger.info(f"[多图识别] 启用全部点击，本轮点击{clicked_count}张，还有{len(remaining_after_click)}张待处理，继续执行本卡片")
-                    mark_multi_image_round_active(context, card_id)
-                    return True, '继续执行本步骤', card_id
-                else:
-                    # 所有图片都成功了
-                    total_success_count = len(all_success_images)
-                    if total_success_count == len(image_paths):
-                        # 全部成功
-                        logger.info(f"[多图识别] 启用全部点击，全部{len(image_paths)}张图片都识别并点击成功")
-                        finish_multi_image_round(context, card_id)
-                        logger.info("[多图识别] 全部成功，已清除记忆")
-                        return _handle_success(on_success_action, success_jump_id, card_id)
-                    else:
-                        # 部分成功，部分失败
-                        failed_count = len(image_paths) - total_success_count
-                        logger.warning(f"[多图识别] 启用全部点击，成功{total_success_count}张，失败{failed_count}张，按失败跳转")
-                        if on_failure_action == '继续执行本步骤':
-                            mark_multi_image_round_active(context, card_id)
-                        else:
-                            finish_multi_image_round(context, card_id)
-                        return _handle_failure(on_failure_action, failure_jump_id, card_id)
-            else:
-                # 本轮没有图片成功，检查是否全部失败
-                all_success_images = context.get_card_data(card_id, 'success_images', set())
-                if len(all_success_images) == 0:
-                    # 全部失败：清除记忆，按失败跳转
-                    logger.warning(f"[多图识别] 启用全部点击，全部{len(image_paths)}张图片都识别失败，清除记忆，按失败跳转")
-                    finish_multi_image_round(context, card_id)
-                    logger.info("[多图识别] 全部失败，已清除记忆")
-                    return _handle_failure(on_failure_action, failure_jump_id, card_id)
-                else:
-                    # 本轮失败但之前有成功
-                    logger.warning("[多图识别] 启用全部点击，本轮所有剩余图片都识别失败，按失败跳转")
-                    if on_failure_action == '继续执行本步骤':
-                        mark_multi_image_round_active(context, card_id)
-                    else:
-                        finish_multi_image_round(context, card_id)
-                    return _handle_failure(on_failure_action, failure_jump_id, card_id)
-        else:
-            # 未启用全部点击模式
-            if found_images:
-                # 不应该到达这里，因为上面已经处理了
-                logger.info("[多图识别] 未启用全部点击，有图片成功，任务完成")
-                finish_multi_image_round(context, card_id)
-                return _handle_success(on_success_action, success_jump_id, card_id)
-            else:
-                # 检查是否还有其他图片没尝试过
-                all_images_tried = len(clicked_images) == len(image_paths)
-                if all_images_tried:
-                    # 所有图片都尝试过且都失败了，才算真的失败
-                    logger.error(f"[多图识别] 未启用全部点击，所有{len(image_paths)}张图片都已尝试且都失败，任务失败")
-                    finish_multi_image_round(context, card_id)
-                    return _handle_failure(on_failure_action, failure_jump_id, card_id)
-                else:
-                    # 还有其他图片没尝试过，继续尝试
-                    untried_count = len(image_paths) - len(clicked_images)
-                    logger.info(f"[多图识别] 未启用全部点击，本轮{len(remaining_images)}张失败，还有{untried_count}张未尝试，继续执行本卡片")
-                    mark_multi_image_round_active(context, card_id)
-                    return True, '继续执行本步骤', card_id
-
-    except Exception as e:
-        logger.error(f"执行多找图功能时发生错误: {e}", exc_info=True)
-        return _handle_failure(on_failure_action, failure_jump_id, card_id)
 
 def _execute_coordinate_click(params: Dict[str, Any], execution_mode: str, target_hwnd: Optional[int],
                              card_id: Optional[int], on_success_action: str, success_jump_id: Optional[int],
@@ -1236,6 +953,7 @@ def _execute_element_click(params: Dict[str, Any], execution_mode: str, target_h
         element_search_depth = params.get('element_search_depth', 30)
         element_timeout = params.get('element_timeout', 5.0)
         element_use_invoke = params.get('element_use_invoke', True)
+        element_strict_invoke = coerce_bool(params.get('element_strict_invoke', False))
         element_enable_click = coerce_bool(params.get('element_enable_click', True))
 
         # 获取鼠标按钮参数
@@ -1307,6 +1025,7 @@ def _execute_element_click(params: Dict[str, Any], execution_mode: str, target_h
                 search_depth=element_search_depth,
                 timeout=element_timeout,
                 use_invoke=element_use_invoke,
+                strict_invoke=element_strict_invoke,
                 button=element_button_mapped
             )
 
@@ -1684,29 +1403,46 @@ def _execute_color_click_original(params: Dict[str, Any], execution_mode: str, t
 
         from tasks.click_coordinate import execute_task as execute_coordinate_click
 
-        button_param = params.get('color_click_button', params.get('button', '左键'))
-        clicks = params.get('color_click_clicks', params.get('clicks', 1))
-        interval = params.get('color_click_interval', params.get('interval', DEFAULT_DOUBLE_CLICK_INTERVAL_SECONDS))
-        click_action = params.get('color_click_action', '完整点击')
-        hold_duration = params.get('color_hold_duration', DEFAULT_CLICK_HOLD_SECONDS)
+        click_button, clicks, interval, click_action, enable_auto_release, hold_duration = resolve_click_params(
+            params,
+            button_key="color_click_button",
+            fallback_button_key="button",
+            clicks_key="color_click_clicks",
+            fallback_clicks_key="clicks",
+            interval_key="color_click_interval",
+            fallback_interval_key="interval",
+            action_key="color_click_action",
+            auto_release_key="color_enable_auto_release",
+            hold_duration_key="color_hold_duration",
+            hold_mode_key="color_hold_mode",
+            hold_min_key="color_hold_duration_min",
+            hold_max_key="color_hold_duration_max",
+            mode_label="找色功能",
+            logger_obj=logger,
+            log_hold_mode=False,
+        )
 
         click_params = {
             'coordinate_x': click_x,
             'coordinate_y': click_y,
             'coordinate_mode': '客户区坐标',
-            'button': button_param,
+            'button': click_button,
             'clicks': clicks,
             'interval': interval,
             'position_mode': '精准坐标',
             'click_action': click_action,
             'hold_duration': hold_duration,
+            'enable_auto_release': enable_auto_release,
             'on_success': on_success_action,
             'success_jump_target_id': success_jump_id,
             'on_failure': on_failure_action,
             'failure_jump_target_id': failure_jump_id,
         }
 
-        logger.info(f"执行找色功能: ({click_x}, {click_y}), 模式={color_mode}, 按钮={button_param}, 次数={clicks}, 动作={click_action}")
+        logger.info(
+            f"执行找色功能: ({click_x}, {click_y}), 模式={color_mode}, "
+            f"按钮={click_button}, 次数={clicks}, 动作={click_action}, 自动释放={enable_auto_release}"
+        )
         result = execute_coordinate_click(
             click_params,
             {},

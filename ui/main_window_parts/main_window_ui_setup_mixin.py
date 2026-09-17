@@ -150,7 +150,7 @@ class MainWindowUiSetupMixin:
         self.main_layout.setSpacing(0)
         # --- Custom Title Bar ---
         # Create the list of actions AFTER _create_actions has run
-        title_bar_actions = [self.toggle_action, self.save_action, self.load_action, self.new_workflow_action, self.export_standalone_action, self.run_action, self.debug_run_action, self.timer_action, self.global_settings_action]
+        title_bar_actions = [self.toggle_action, self.save_action, self.load_action, self.new_workflow_action, self.export_standalone_action, self.ai_workflow_action, self.run_action, self.debug_run_action, self.timer_action, self.global_settings_action]
         self.title_bar = CustomTitleBar(self, actions=title_bar_actions)
         self.main_layout.addWidget(self.title_bar)
         self.title_bar.set_file_actions_visible(self.file_actions_visible)
@@ -162,6 +162,7 @@ class MainWindowUiSetupMixin:
             getattr(self, "load_action", None),
             getattr(self, "new_workflow_action", None),
             getattr(self, "export_standalone_action", None),
+            getattr(self, "ai_workflow_action", None),
             getattr(self, "run_action", None),
             getattr(self, "debug_run_action", None),
             getattr(self, "timer_action", None),

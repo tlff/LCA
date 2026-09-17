@@ -179,32 +179,53 @@ class ControlCenterWindowTaskMixin:
     def _check_running_window_handles(self):
         if getattr(self, "_is_closing", False):
             return
-        from utils.window.window_identity import is_window_alive
+        from utils.window.window_identity import is_window_alive, resolve_bound_window_hwnd
         from .control_center_dispatch import (
-            CONTROL_CENTER_DEAD_HWND_MESSAGE,
-            collect_dead_running_window_ids,
+            refresh_occupying_runner_hwnd_leases,
             select_unnotified_ids,
         )
 
+        scheduler = getattr(self, "scheduler", None)
+
+        def _on_lease_refresh(window_id: str, hwnd: int) -> None:
+            if scheduler is not None:
+                scheduler.refresh_hwnd(window_id, hwnd)
+            logger.info("中控已刷新窗口句柄租约: window_id=%s hwnd=%s", window_id, hwnd)
+
         notified = getattr(self, "_dead_hwnd_stopped", set())
-        dead_ids = collect_dead_running_window_ids(self.window_runners, is_window_alive)
-        new_ids = select_unnotified_ids(dead_ids, notified)
+        reasons = getattr(self, "_dead_hwnd_reasons", {})
+        dead = refresh_occupying_runner_hwnd_leases(
+            self.window_runners,
+            is_window_alive,
+            resolve_bound_window_hwnd,
+            on_refresh=_on_lease_refresh,
+        )
+        new_ids = select_unnotified_ids([item.window_id for item in dead], notified)
         if not new_ids:
             return
+        message_by_id = {item.window_id: item.message for item in dead}
         for window_id in new_ids:
             notified.add(window_id)
-            logger.warning("中控检测到目标窗口失效: window_id=%s", window_id)
+            message = message_by_id.get(window_id) or "目标窗口已失效"
+            reasons[window_id] = message
+            logger.warning("中控检测到目标窗口失效: window_id=%s, reason=%s", window_id, message)
+            if scheduler is not None:
+                scheduler.request_stop(window_id)
+                scheduler.apply_runner_state(
+                    window_id,
+                    JobState.FAILED,
+                    step=message,
+                    force=True,
+                    error=message,
+                )
             try:
                 self._direct_stop_window_task(window_id)
             except Exception as exc:
                 logger.error("停止失效窗口失败: window_id=%s, error=%s", window_id, exc)
-            self._update_single_window_table_status(
-                window_id,
-                "执行失败",
-                CONTROL_CENTER_DEAD_HWND_MESSAGE,
-            )
-            self.log_message(f"窗口{window_id}: {CONTROL_CENTER_DEAD_HWND_MESSAGE}")
+            self._paint_job_snapshot(window_id)
+            self.log_message(f"窗口{window_id}: {message}")
         self._dead_hwnd_stopped = notified
+        self._dead_hwnd_reasons = reasons
 
     def _is_start_aborted(self, window_id: str) -> bool:
         scheduler = getattr(self, "scheduler", None)
@@ -341,7 +362,6 @@ class ControlCenterWindowTaskMixin:
             self.task_modules,
             workflow_file_path=workflow_info.get("file_path"),
             workflow_slot=workflow_index,
-            start_gate_event=self._batch_start_gate_event,
             bound_windows=self.bound_windows,
             execution_mode=configured_execution_mode,
             runtime_config=runtime_config,
@@ -457,7 +477,7 @@ class ControlCenterWindowTaskMixin:
         scheduler = getattr(self, "scheduler", None)
         if scheduler is not None and resolved_id:
             job = scheduler.get_job(resolved_id)
-            if job is not None and job.state in {TaskState.STOPPED, TaskState.STOPPING}:
+            if job is not None and job.state in {TaskState.STOPPED, TaskState.STOPPING, TaskState.FAILED}:
                 if job.state == TaskState.STOPPING:
                     scheduler.apply_runner_state(resolved_id, TaskState.STOPPED)
                 self._paint_job_snapshot(resolved_id)

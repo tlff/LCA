@@ -1,10 +1,23 @@
 import json
 import os
+import shutil
 from typing import Any, Dict, List, Optional, Tuple
 
-from utils.image_paths import get_image_path_resolver
-from utils.app_paths import normalize_workflow_image_path
+from task_workflow.thread_start import THREAD_START_TASK_TYPE
 
+from utils.app_paths import (
+    get_app_root,
+    get_dicts_dir,
+    get_images_dir,
+    get_sounds_dir,
+    get_plugin_dir,
+    get_user_data_dir,
+    get_workflows_dir,
+    normalize_workflow_image_path,
+)
+
+WORKFLOW_RESOURCE_SUBDIRS = ("images", "sounds", "dicts", "yolo", "replays")
+_WORKFLOW_FILE_EXTENSIONS = {".json", ".lca"}
 
 WORKSPACE_FAVORITES_SCHEMA_VERSION = 3
 
@@ -190,22 +203,269 @@ def extract_workflow_metadata(workflow_data: Optional[Dict[str, Any]]) -> Dict[s
     return dict(metadata) if isinstance(metadata, dict) else {}
 
 
-def extract_workflow_gallery_path(workflow_data: Optional[Dict[str, Any]]) -> str:
+def extract_workflow_resource_path(workflow_data: Optional[Dict[str, Any]]) -> str:
     metadata = extract_workflow_metadata(workflow_data)
-    gallery_path = str(metadata.get("custom_gallery_path") or "").strip()
-    if not gallery_path:
+    resource_path = str(metadata.get("custom_resource_path") or "").strip()
+    if not resource_path:
         return ""
-    return os.path.abspath(os.path.normpath(gallery_path))
+    return os.path.abspath(os.path.normpath(resource_path))
+
+
+def project_resource_dirs(resource_path: str) -> Dict[str, Any]:
+    root = normalize_workspace_dir(resource_path)
+    if not root:
+        raise ValueError("资源目录不能为空")
+    return {
+        "root": root,
+        "images_dir": os.path.join(root, "images"),
+        "sounds_dir": os.path.join(root, "sounds"),
+        "dicts_dir": os.path.join(root, "dicts"),
+        "yolo_dir": os.path.join(root, "yolo"),
+        "replays_dir": os.path.join(root, "replays"),
+        "plugins_dir": get_plugin_dir(),
+        "custom": True,
+    }
+
+
+def global_resource_dirs(default_images_dir: str = "") -> Dict[str, Any]:
+    app_root = get_app_root()
+    images_dir = str(default_images_dir or "").strip() or get_images_dir("LCA")
+    return {
+        "root": "",
+        "images_dir": images_dir,
+        "sounds_dir": get_sounds_dir("LCA"),
+        "dicts_dir": get_dicts_dir("LCA"),
+        "yolo_dir": os.path.join(app_root, "yolo"),
+        "replays_dir": os.path.join(app_root, "replays"),
+        "plugins_dir": get_plugin_dir(),
+        "custom": False,
+    }
+
+
+def workflow_resource_dirs(
+    workflow_data: Optional[Dict[str, Any]],
+    default_images_dir: str = "",
+) -> Dict[str, Any]:
+    resource_path = extract_workflow_resource_path(workflow_data)
+    if resource_path:
+        return project_resource_dirs(resource_path)
+    return global_resource_dirs(default_images_dir)
 
 
 def get_effective_workflow_images_dir(
     workflow_data: Optional[Dict[str, Any]],
     default_images_dir: str,
 ) -> str:
-    gallery_path = extract_workflow_gallery_path(workflow_data)
-    if gallery_path and os.path.isdir(gallery_path):
-        return gallery_path
-    return str(default_images_dir or "").strip()
+    return str(workflow_resource_dirs(workflow_data, default_images_dir).get("images_dir") or "")
+
+
+def ensure_workflow_resource_subdirs(resource_dir: str) -> None:
+    root = normalize_workspace_dir(resource_dir)
+    if not root:
+        raise ValueError("资源目录不能为空")
+    os.makedirs(root, exist_ok=True)
+    for name in WORKFLOW_RESOURCE_SUBDIRS:
+        os.makedirs(os.path.join(root, name), exist_ok=True)
+
+
+def list_root_workflow_files(folder: str) -> List[str]:
+    root = normalize_workspace_dir(folder)
+    if not root or not os.path.isdir(root):
+        return []
+    try:
+        names = os.listdir(root)
+    except OSError:
+        return []
+    files: List[str] = []
+    for name in names:
+        extension = os.path.splitext(name)[1].lower()
+        if extension not in _WORKFLOW_FILE_EXTENSIONS:
+            continue
+        full_path = os.path.abspath(os.path.join(root, name))
+        if os.path.isfile(full_path):
+            files.append(full_path)
+    files.sort(key=lambda path: path.lower())
+    return files
+
+
+def is_exclusive_workflow_dir(folder: str, workflow_path: str) -> bool:
+    files = list_root_workflow_files(folder)
+    if not files:
+        return True
+    current_keys = set(workflow_path_keys(workflow_path))
+    current_stem = workflow_stem_key(workflow_path)
+    for path in files:
+        if favorite_path_key(path) in current_keys:
+            continue
+        if current_stem and workflow_stem_key(path) == current_stem:
+            continue
+        return False
+    return True
+
+
+def exclusive_workflow_filepath(desired_file: str) -> str:
+    raw_path = str(desired_file or "").strip()
+    if not raw_path:
+        raise ValueError("工作流路径不能为空")
+    abs_path = os.path.abspath(raw_path)
+    folder, filename = os.path.split(abs_path)
+    stem, extension = os.path.splitext(filename)
+    if not stem:
+        raise ValueError("工作流路径不能为空")
+    if not extension:
+        extension = ".lca"
+    candidate = os.path.join(folder, f"{stem}{extension}")
+    if is_exclusive_workflow_dir(folder, candidate):
+        return candidate
+    return os.path.join(folder, stem, f"{stem}{extension}")
+
+
+def is_default_app_workspace(path: str) -> bool:
+    """软件默认保存目录不算用户添加的工作区。"""
+    root = normalize_workspace_dir(path)
+    if not root:
+        return False
+    defaults = (
+        normalize_workspace_dir(get_workflows_dir()),
+        normalize_workspace_dir(get_user_data_dir("LCA")),
+    )
+    root_key = os.path.normcase(root)
+    return any(root_key == os.path.normcase(item) for item in defaults if item)
+
+
+def blank_workflow_data(project_dir: str) -> Dict[str, Any]:
+    root = os.path.abspath(str(project_dir or "").strip())
+    return {
+        "cards": [
+            {
+                "id": 0,
+                "task_type": THREAD_START_TASK_TYPE,
+                "pos_x": 0,
+                "pos_y": 0,
+                "parameters": {},
+            }
+        ],
+        "connections": [],
+        "metadata": {
+            "created": "blank",
+            "place_start_at_viewport": True,
+            "version": "1.0",
+            "custom_resource_path": root,
+        },
+    }
+
+
+def default_new_workflow_filepath(name: str) -> str:
+    return new_workflow_filepath(name, "")
+
+
+def new_workflow_filepath(name: str, workspace_dir: str = "") -> str:
+    text = str(name or "").strip()
+    if not text:
+        raise ValueError("工作流名称不能为空")
+    stem, extension = os.path.splitext(text)
+    if extension.lower() in _WORKFLOW_FILE_EXTENSIONS:
+        text = stem
+    if not text:
+        raise ValueError("工作流名称不能为空")
+    root = normalize_workspace_dir(workspace_dir)
+    if root:
+        return exclusive_workflow_filepath(os.path.join(root, f"{text}.lca"))
+    return os.path.join(get_workflows_dir(), text, f"{text}.lca")
+
+
+def apply_resource_dirs_to_task(task: Any, dirs: Dict[str, Any], default_images_dir: str = "") -> None:
+    task.images_dir = str(dirs.get("images_dir") or default_images_dir or "")
+    task.sounds_dir = str(dirs.get("sounds_dir") or "")
+    task.dicts_dir = str(dirs.get("dicts_dir") or "")
+    task.yolo_dir = str(dirs.get("yolo_dir") or "")
+    task.replays_dir = str(dirs.get("replays_dir") or "")
+    task.plugins_dir = str(dirs.get("plugins_dir") or "")
+
+
+def apply_updated_workflow_resource_dir(
+    task: Any,
+    resource_dir: str = "",
+    workflow_data: Optional[Dict[str, Any]] = None,
+    default_images_dir: str = "",
+) -> Dict[str, Any]:
+    if isinstance(workflow_data, dict):
+        task.workflow_data = workflow_data
+    data = task.workflow_data if isinstance(getattr(task, "workflow_data", None), dict) else {}
+    if not isinstance(data, dict):
+        data = {"cards": [], "connections": [], "metadata": {}}
+        task.workflow_data = data
+    normalized = normalize_workspace_dir(resource_dir)
+    if normalized:
+        metadata = data.get("metadata")
+        if not isinstance(metadata, dict):
+            metadata = {}
+            data["metadata"] = metadata
+        metadata.pop("custom_gallery_path", None)
+        metadata["custom_resource_path"] = normalized
+        dirs = project_resource_dirs(normalized)
+    else:
+        dirs = resolve_runtime_resource_dirs(
+            data,
+            workflow_filepath=str(getattr(task, "filepath", "") or ""),
+            default_images_dir=default_images_dir,
+        )
+    apply_resource_dirs_to_task(task, dirs, default_images_dir)
+    return dirs
+
+
+def resolve_runtime_resource_dirs(
+    workflow_data: Optional[Dict[str, Any]] = None,
+    *,
+    workflow_filepath: str = "",
+    default_images_dir: str = "",
+) -> Dict[str, Any]:
+    dirs = workflow_resource_dirs(workflow_data, default_images_dir)
+    if dirs.get("custom"):
+        return dirs
+    filepath = str(workflow_filepath or "").strip()
+    if not filepath or not os.path.isfile(filepath):
+        return dirs
+    folder = os.path.dirname(os.path.abspath(filepath))
+    if is_exclusive_workflow_dir(folder, filepath):
+        return project_resource_dirs(folder)
+    return dirs
+
+
+def resource_runtime_kwargs(dirs: Optional[Dict[str, Any]] = None) -> Dict[str, str]:
+    data = dirs if isinstance(dirs, dict) else {}
+    return {
+        "images_dir": str(data.get("images_dir") or ""),
+        "sounds_dir": str(data.get("sounds_dir") or ""),
+        "dicts_dir": str(data.get("dicts_dir") or ""),
+        "yolo_dir": str(data.get("yolo_dir") or ""),
+        "replays_dir": str(data.get("replays_dir") or ""),
+        "plugins_dir": str(data.get("plugins_dir") or get_plugin_dir()),
+    }
+
+
+def prepare_exclusive_workflow_save(
+    workflow_data: Dict[str, Any],
+    desired_file: str,
+    *,
+    source_filepath: str = "",
+) -> str:
+    filepath = exclusive_workflow_filepath(desired_file)
+    root = os.path.dirname(os.path.abspath(filepath))
+    os.makedirs(root, exist_ok=True)
+    ensure_workflow_resource_subdirs(root)
+    migrate_workflow_resources_to_dir(
+        workflow_data,
+        root,
+        workflow_filepath=source_filepath or filepath,
+    )
+    metadata = workflow_data.get("metadata")
+    if not isinstance(metadata, dict):
+        metadata = {}
+        workflow_data["metadata"] = metadata
+    metadata.pop("custom_gallery_path", None)
+    metadata["custom_resource_path"] = root
+    return filepath
 
 
 def iter_workspace_workflow_files(workspace_dir: str) -> List[str]:
@@ -256,9 +516,9 @@ def _normalize_saved_local_favorite(item: Dict[str, Any]) -> Optional[Dict[str, 
         "checked": bool(item.get("checked", False)),
         "name": str(item.get("name") or "").strip(),
     }
-    gallery_path = str(item.get("gallery_path") or "").strip()
-    if gallery_path:
-        normalized_item["gallery_path"] = os.path.abspath(os.path.normpath(gallery_path))
+    resource_path = str(item.get("resource_path") or "").strip()
+    if resource_path:
+        normalized_item["resource_path"] = os.path.abspath(os.path.normpath(resource_path))
     workspace_dir = normalize_workspace_dir(item.get("workspace_dir"))
     if workspace_dir:
         normalized_item["workspace_dir"] = workspace_dir
@@ -422,10 +682,16 @@ def build_workspace_favorites(
         saved_state_map[favorite_path_key(normalized_item["filepath"])] = normalized_item
 
     favorites: List[Dict[str, Any]] = []
-    for workspace_dir in workspaces:
-        normalized_workspace = normalize_workspace_dir(workspace_dir)
-        if not normalized_workspace:
-            continue
+    existing_keys: set = set()
+    ordered_workspaces = sorted(
+        (
+            normalized
+            for normalized in (normalize_workspace_dir(item) for item in workspaces)
+            if normalized
+        ),
+        key=lambda path: (-len(path), path.lower()),
+    )
+    for normalized_workspace in ordered_workspaces:
         if not os.path.isdir(normalized_workspace):
             offline_entries: List[Dict[str, Any]] = []
             for item in saved_favorites:
@@ -442,6 +708,8 @@ def build_workspace_favorites(
                     continue
                 if workflow_matches_any(saved_state["filepath"], excluded_paths):
                     continue
+                if set(workflow_path_keys(saved_state["filepath"])) & existing_keys:
+                    continue
                 offline_entries.append(
                     _make_workspace_favorite_entry(
                         saved_state["filepath"],
@@ -450,11 +718,16 @@ def build_workspace_favorites(
                         None,
                     )
                 )
-            favorites.extend(_prefer_lca_sibling_favorites(offline_entries))
+            preferred = _prefer_lca_sibling_favorites(offline_entries)
+            favorites.extend(preferred)
+            for entry in preferred:
+                existing_keys.update(workflow_path_keys(str(entry.get("filepath") or "")))
             continue
 
         for workflow_path in iter_workspace_workflow_files(normalized_workspace):
             if workflow_matches_any(workflow_path, excluded_paths):
+                continue
+            if set(workflow_path_keys(workflow_path)) & existing_keys:
                 continue
             workflow_data = load_workspace_workflow(workflow_path)
             saved_state = _lookup_saved_favorite_state(workflow_path, saved_state_map)
@@ -466,10 +739,8 @@ def build_workspace_favorites(
                     workflow_data,
                 )
             )
+            existing_keys.update(workflow_path_keys(workflow_path))
 
-    existing_keys = set()
-    for favorite in favorites:
-        existing_keys.update(workflow_path_keys(str(favorite.get("filepath") or "")))
     for extra_path in extra_paths:
         if workflow_matches_any(extra_path, excluded_paths):
             continue
@@ -513,8 +784,8 @@ def _prefer_lca_sibling_favorites(entries: List[Dict[str, Any]]) -> List[Dict[st
         keep["checked"] = bool(keep.get("checked")) or bool(drop.get("checked"))
         if not str(keep.get("name") or "").strip():
             keep["name"] = drop.get("name") or keep.get("name")
-        if not keep.get("gallery_path") and drop.get("gallery_path"):
-            keep["gallery_path"] = drop.get("gallery_path")
+        if not keep.get("resource_path") and drop.get("resource_path"):
+            keep["resource_path"] = drop.get("resource_path")
         by_stem[stem] = keep
     return [by_stem[stem] for stem in order]
 
@@ -537,11 +808,11 @@ def _make_workspace_favorite_entry(
     workflow_data: Optional[Dict[str, Any]],
     source: str = "workspace",
 ) -> Dict[str, Any]:
-    gallery_path = extract_workflow_gallery_path(workflow_data) if workflow_data else ""
-    if not gallery_path:
-        gallery_path = str(saved_state.get("gallery_path") or "").strip()
-        if gallery_path:
-            gallery_path = os.path.abspath(os.path.normpath(gallery_path))
+    resource_path = extract_workflow_resource_path(workflow_data) if workflow_data else ""
+    if not resource_path:
+        resource_path = str(saved_state.get("resource_path") or "").strip()
+        if resource_path:
+            resource_path = os.path.abspath(os.path.normpath(resource_path))
 
     display_name = str(saved_state.get("name") or "").strip()
     if not display_name:
@@ -555,8 +826,8 @@ def _make_workspace_favorite_entry(
     }
     if workspace_dir:
         entry["workspace_dir"] = workspace_dir
-    if gallery_path:
-        entry["gallery_path"] = gallery_path
+    if resource_path:
+        entry["resource_path"] = resource_path
     return entry
 
 
@@ -661,25 +932,109 @@ def _split_multi_image_value(raw_value: str) -> Tuple[List[str], str]:
     return [value.strip()], "\n"
 
 
-def _sync_single_image_value(
-    resolver,
+def _strip_resource_prefix(relative_path: str) -> str:
+    text = str(relative_path or "").replace("\\", "/").lstrip("./")
+    lowered = text.lower()
+    for prefix in ("images/", "sounds/", "dicts/", "yolo/", "replays/", "plugins/"):
+        if lowered.startswith(prefix):
+            return text[len(prefix):]
+    return text
+
+
+def _match_resource_file(raw_value: str, root: str) -> str:
+    value = str(raw_value or "").strip()
+    if not value or value.startswith("memory://"):
+        return ""
+    root_abs = normalize_workspace_dir(root)
+    if not root_abs:
+        return ""
+    relative = _strip_resource_prefix(value)
+    basename = os.path.basename(value.replace("\\", "/"))
+    candidates = [
+        os.path.join(root_abs, relative.replace("/", os.sep)),
+        os.path.join(root_abs, basename),
+    ]
+    seen = set()
+    for candidate in candidates:
+        if not candidate:
+            continue
+        abs_candidate = os.path.abspath(candidate)
+        key = os.path.normcase(abs_candidate)
+        if key in seen:
+            continue
+        seen.add(key)
+        if os.path.isfile(abs_candidate):
+            return abs_candidate
+    return ""
+
+
+def _normalize_synced_resource_path(resolved: str, dest_dirs: Dict[str, Any]) -> str:
+    abs_value = os.path.abspath(resolved)
+    abs_key = os.path.normcase(abs_value)
+    for key, folder in (
+        ("sounds_dir", "sounds"),
+        ("dicts_dir", "dicts"),
+        ("yolo_dir", "yolo"),
+        ("replays_dir", "replays"),
+        ("images_dir", "images"),
+    ):
+        root = normalize_workspace_dir(str(dest_dirs.get(key) or ""))
+        if not root:
+            continue
+        root_key = os.path.normcase(root)
+        if abs_key == root_key:
+            return folder
+        if abs_key.startswith(root_key + os.sep):
+            relative_path = os.path.relpath(abs_value, root).replace(os.sep, "/")
+            return f"{folder}/{relative_path}"
+    return normalize_workflow_image_path(
+        resolved,
+        images_dir=str(dest_dirs.get("images_dir") or ""),
+    )
+
+
+def _resource_param_kind(param_key: str) -> str:
+    key = str(param_key or "").strip()
+    if not key:
+        return ""
+    if key in {"image_paths", "raw_image_paths"} or key.endswith("_image_paths"):
+        return "images_multi"
+    if key in {"image_path", "template_path"} or key.endswith("_image_path"):
+        return "image"
+    if key in {"sound_path", "audio_path", "audio_file"} or key.endswith(
+        ("_sound_path", "_audio_path", "_audio_file")
+    ):
+        return "sound"
+    if key in {"dict_path", "dict_file"} or key.endswith(("_dict_path", "_dict_file")):
+        return "dict"
+    if key in {"model_path"} or key.endswith("_model_path"):
+        return "model"
+    if key in {"replay_path", "replay_file"} or key.endswith(("_replay_path", "_replay_file")):
+        return "replay"
+    return ""
+
+
+def _sync_single_resource_value(
     raw_value: Any,
+    root: str,
+    dest_dirs: Dict[str, Any],
 ) -> Tuple[Any, bool]:
     value = str(raw_value or "").strip()
     if not value or value.startswith("memory://"):
         return raw_value, False
-    resolved = resolver.resolve(value)
+    resolved = _match_resource_file(value, root)
     if not resolved:
         return raw_value, False
-    normalized_value = normalize_workflow_image_path(resolved)
+    normalized_value = _normalize_synced_resource_path(resolved, dest_dirs)
     if normalized_value == raw_value:
         return raw_value, False
     return normalized_value, True
 
 
-def _sync_multi_image_value(
-    resolver,
+def _sync_multi_resource_value(
     raw_value: Any,
+    root: str,
+    dest_dirs: Dict[str, Any],
 ) -> Tuple[Any, int]:
     if not isinstance(raw_value, str):
         return raw_value, 0
@@ -694,7 +1049,11 @@ def _sync_multi_image_value(
         if not part or part.startswith("#"):
             normalized_parts.append(part)
             continue
-        normalized_part, changed = _sync_single_image_value(resolver, part)
+        normalized_part, changed = _sync_single_resource_value(
+            part,
+            root,
+            dest_dirs,
+        )
         if changed:
             changed_count += 1
         normalized_parts.append(str(normalized_part or "").strip())
@@ -707,16 +1066,21 @@ def _sync_multi_image_value(
     return "\n".join(normalized_parts), changed_count
 
 
-def sync_workflow_images_from_gallery(workflow_data: Dict[str, Any], gallery_dir: str) -> int:
+def sync_workflow_resources_from_root(workflow_data: Dict[str, Any], resource_dir: str) -> int:
     workflow_body = get_workflow_body(workflow_data)
     if not isinstance(workflow_body, dict):
         return 0
-    normalized_gallery = normalize_workspace_dir(gallery_dir)
-    if not normalized_gallery or not os.path.isdir(normalized_gallery):
+    root = normalize_workspace_dir(resource_dir)
+    if not root or not os.path.isdir(root):
         return 0
-
-    resolver = get_image_path_resolver()
-    resolver.add_search_path(normalized_gallery, priority=0)
+    dest_dirs = project_resource_dirs(root)
+    kind_roots = {
+        "image": str(dest_dirs.get("images_dir") or ""),
+        "sound": str(dest_dirs.get("sounds_dir") or ""),
+        "dict": str(dest_dirs.get("dicts_dir") or ""),
+        "model": str(dest_dirs.get("yolo_dir") or ""),
+        "replay": str(dest_dirs.get("replays_dir") or ""),
+    }
 
     cards = workflow_body.get("cards")
     if not isinstance(cards, list):
@@ -731,27 +1095,522 @@ def sync_workflow_images_from_gallery(workflow_data: Dict[str, Any], gallery_dir
             continue
 
         for param_name, param_value in list(parameters.items()):
-            param_key = str(param_name or "").strip()
-            if not param_key:
-                continue
-
-            if param_key == "image_path" or param_key.endswith("_image_path"):
-                normalized_value, changed = _sync_single_image_value(resolver, param_value)
-                if changed:
-                    parameters[param_name] = normalized_value
-                    updated_count += 1
-                continue
-
-            if param_key == "image_paths" or param_key == "raw_image_paths" or param_key.endswith("_image_paths"):
-                normalized_value, changed_count = _sync_multi_image_value(resolver, param_value)
+            kind = _resource_param_kind(param_name)
+            if kind == "images_multi":
+                normalized_value, changed_count = _sync_multi_resource_value(
+                    param_value,
+                    kind_roots["image"],
+                    dest_dirs,
+                )
                 if changed_count > 0:
                     parameters[param_name] = normalized_value
                     updated_count += changed_count
+                continue
+            search_root = kind_roots.get(kind) or ""
+            if not search_root:
+                continue
+            normalized_value, changed = _sync_single_resource_value(
+                param_value,
+                search_root,
+                dest_dirs,
+            )
+            if changed:
+                parameters[param_name] = normalized_value
+                updated_count += 1
 
     return updated_count
 
 
-def update_workflow_gallery_path(filepath: str, gallery_dir: str) -> Dict[str, Any]:
+def _workflow_file_token(filepath: str) -> str:
+    raw = os.path.splitext(os.path.basename(str(filepath or "").strip()))[0]
+    if not raw:
+        return ""
+    invalid_chars = set('<>:"/\\|?*')
+    chars = []
+    for ch in raw:
+        if ch in invalid_chars or ord(ch) < 32 or ch.isspace():
+            chars.append("_")
+        else:
+            chars.append(ch)
+    token = "".join(chars).strip("._ ")
+    while "__" in token:
+        token = token.replace("__", "_")
+    return token[:64]
+
+
+def _path_is_under_root(path: str, root: str) -> bool:
+    path_abs = normalize_workspace_dir(path)
+    root_abs = normalize_workspace_dir(root)
+    if not path_abs or not root_abs:
+        return False
+    path_key = os.path.normcase(path_abs)
+    root_key = os.path.normcase(root_abs)
+    return path_key == root_key or path_key.startswith(root_key + os.sep)
+
+
+def _unique_dirs(*dirs: str) -> List[str]:
+    result: List[str] = []
+    seen = set()
+    for raw in dirs:
+        text = normalize_workspace_dir(raw)
+        if not text:
+            continue
+        key = os.path.normcase(text)
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(text)
+    return result
+
+
+def _card_id_value(card_data: Dict[str, Any]) -> Optional[int]:
+    value = card_data.get("id")
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    return value
+
+
+def _strip_leading_kind_folder(relative_path: str, folder: str) -> str:
+    text = str(relative_path or "").replace("\\", "/").lstrip("./")
+    folder_name = str(folder or "").strip("/").lower()
+    if not text or not folder_name:
+        return text
+    lowered = text.lower()
+    if lowered == folder_name:
+        return ""
+    prefix = folder_name + "/"
+    if lowered.startswith(prefix):
+        return text[len(prefix) :]
+    if folder_name == "dicts":
+        for extra in ("images/dicts/", "images/"):
+            if lowered.startswith(extra):
+                text = text[len(extra) :]
+                lowered = text.lower()
+                if extra == "images/" and lowered.startswith("dicts/"):
+                    return text[len("dicts/") :]
+                return text
+    return text
+
+
+def _resource_layout(
+    kind: str,
+    dest_dirs: Dict[str, Any],
+    old_root: str,
+    source_dirs: Dict[str, Any],
+) -> Tuple[str, List[str], List[str], str]:
+    dest_root = str(dest_dirs.get("root") or "")
+    old_images = os.path.join(old_root, "images") if old_root else ""
+    old_sounds = os.path.join(old_root, "sounds") if old_root else ""
+    old_dicts = os.path.join(old_root, "dicts") if old_root else ""
+    old_yolo = os.path.join(old_root, "yolo") if old_root else ""
+    old_replays = os.path.join(old_root, "replays") if old_root else ""
+    if kind == "sound":
+        dest_kind = str(dest_dirs.get("sounds_dir") or "")
+        return (
+            dest_kind,
+            _unique_dirs(old_sounds, old_root, str(source_dirs.get("sounds_dir") or "")),
+            _unique_dirs(dest_kind, old_sounds, str(source_dirs.get("sounds_dir") or "")),
+            "sounds",
+        )
+    if kind == "dict":
+        dest_kind = str(dest_dirs.get("dicts_dir") or "")
+        return (
+            dest_kind,
+            _unique_dirs(
+                old_dicts,
+                os.path.join(old_images, "dicts") if old_images else "",
+                old_root,
+                str(source_dirs.get("dicts_dir") or ""),
+                str(source_dirs.get("images_dir") or ""),
+            ),
+            _unique_dirs(
+                dest_kind,
+                old_dicts,
+                str(source_dirs.get("dicts_dir") or ""),
+                str(source_dirs.get("images_dir") or ""),
+            ),
+            "dicts",
+        )
+    if kind == "model":
+        dest_kind = str(dest_dirs.get("yolo_dir") or "")
+        return (
+            dest_kind,
+            _unique_dirs(old_yolo, old_root, str(source_dirs.get("yolo_dir") or "")),
+            _unique_dirs(dest_kind, old_yolo, str(source_dirs.get("yolo_dir") or "")),
+            "yolo",
+        )
+    if kind == "replay":
+        dest_kind = str(dest_dirs.get("replays_dir") or "")
+        return (
+            dest_kind,
+            _unique_dirs(old_replays, old_root, str(source_dirs.get("replays_dir") or "")),
+            _unique_dirs(dest_kind, old_replays, str(source_dirs.get("replays_dir") or "")),
+            "replays",
+        )
+    dest_kind = str(dest_dirs.get("images_dir") or dest_root)
+    return (
+        dest_kind,
+        _unique_dirs(old_images, old_root, str(source_dirs.get("images_dir") or "")),
+        _unique_dirs(dest_kind, old_images, str(source_dirs.get("images_dir") or "")),
+        "images",
+    )
+
+
+def _locate_resource_source(
+    raw_value: str,
+    dest_kind_dir: str,
+    search_dirs: List[str],
+    dest_root: str = "",
+) -> str:
+    value = str(raw_value or "").strip()
+    if not value or value.startswith("memory://"):
+        return ""
+    for root in _unique_dirs(dest_kind_dir, dest_root):
+        found = _match_resource_file(value, root)
+        if found:
+            return found
+    if os.path.isabs(value) and os.path.isfile(value):
+        return os.path.abspath(value)
+    for root in search_dirs:
+        found = _match_resource_file(value, root)
+        if found:
+            return found
+    return ""
+
+
+def _resource_dest_path(
+    src: str,
+    dest_kind_dir: str,
+    preserve_roots: List[str],
+    kind_folder: str,
+) -> str:
+    src_abs = os.path.abspath(src)
+    for root in preserve_roots:
+        if not _path_is_under_root(src_abs, root):
+            continue
+        relative = os.path.relpath(src_abs, root).replace("\\", "/")
+        relative = _strip_leading_kind_folder(relative, kind_folder)
+        if not relative or relative in {".", ""}:
+            return os.path.join(dest_kind_dir, os.path.basename(src_abs))
+        return os.path.join(dest_kind_dir, *relative.split("/"))
+    return os.path.join(dest_kind_dir, os.path.basename(src_abs))
+
+
+def _try_copy_resource_file(src: str, dest: str) -> Tuple[str, bool]:
+    src_abs = os.path.abspath(src)
+    dest_abs = os.path.abspath(dest)
+    if os.path.normcase(src_abs) == os.path.normcase(dest_abs):
+        return dest_abs, False
+    if os.path.isfile(dest_abs):
+        return dest_abs, False
+    try:
+        parent = os.path.dirname(dest_abs)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        shutil.copy2(src_abs, dest_abs)
+    except OSError:
+        return "", False
+    return dest_abs, True
+
+
+def _copy_model_sidecars(src_file: str, dest_file: str) -> int:
+    if os.path.splitext(src_file)[1].lower() != ".onnx":
+        return 0
+    src_classes = os.path.join(os.path.dirname(os.path.abspath(src_file)), "classes.txt")
+    if not os.path.isfile(src_classes):
+        return 0
+    dest_classes = os.path.join(os.path.dirname(os.path.abspath(dest_file)), "classes.txt")
+    _dest, copied = _try_copy_resource_file(src_classes, dest_classes)
+    return 1 if copied else 0
+
+
+def _migrate_one_resource_path(
+    raw_value: Any,
+    kind: str,
+    dest_dirs: Dict[str, Any],
+    old_root: str,
+    source_dirs: Dict[str, Any],
+) -> Tuple[Any, int, int, int]:
+    value = str(raw_value or "").strip()
+    if not value or value.startswith("memory://"):
+        return raw_value, 0, 0, 0
+    dest_kind_dir, search_dirs, preserve_roots, kind_folder = _resource_layout(
+        kind,
+        dest_dirs,
+        old_root,
+        source_dirs,
+    )
+    extra_dest = str(dest_dirs.get("root") or "") if kind in {"image", "dict"} else ""
+    source_path = _locate_resource_source(value, dest_kind_dir, search_dirs, extra_dest)
+    if not source_path:
+        return raw_value, 0, 1, 0
+    dest_path = _resource_dest_path(source_path, dest_kind_dir, preserve_roots, kind_folder)
+    dest_file, copied = _try_copy_resource_file(source_path, dest_path)
+    if not dest_file or not os.path.isfile(dest_file):
+        return raw_value, 0, 1, 0
+    copied_count = 1 if copied else 0
+    if kind == "model":
+        copied_count += _copy_model_sidecars(source_path, dest_file)
+    normalized = _normalize_synced_resource_path(dest_file, dest_dirs)
+    if normalized == value:
+        return raw_value, copied_count, 0, 0
+    return normalized, copied_count, 0, 1
+
+
+def _migrate_multi_resource_paths(
+    raw_value: Any,
+    dest_dirs: Dict[str, Any],
+    old_root: str,
+    source_dirs: Dict[str, Any],
+) -> Tuple[Any, int, int, int]:
+    if not isinstance(raw_value, str):
+        return raw_value, 0, 0, 0
+    parts, separator = _split_multi_image_value(raw_value)
+    if not parts:
+        return raw_value, 0, 0, 0
+    copied_count = 0
+    missing_count = 0
+    updated_count = 0
+    normalized_parts: List[str] = []
+    for part in parts:
+        if not part or part.startswith("#"):
+            normalized_parts.append(part)
+            continue
+        new_part, copied, missing, updated = _migrate_one_resource_path(
+            part,
+            "image",
+            dest_dirs,
+            old_root,
+            source_dirs,
+        )
+        copied_count += copied
+        missing_count += missing
+        updated_count += updated
+        normalized_parts.append(str(new_part or "").strip())
+    if updated_count <= 0:
+        return raw_value, copied_count, missing_count, 0
+    if separator == ";":
+        return ";".join(normalized_parts), copied_count, missing_count, updated_count
+    return "\n".join(normalized_parts), copied_count, missing_count, updated_count
+
+
+def _script_migrate_kind(item: Dict[str, Any]) -> str:
+    kind = str(item.get("kind") or "").strip().lower()
+    mapping = {
+        "image": "image",
+        "audio": "sound",
+        "model": "model",
+        "replay": "replay",
+    }
+    if kind in mapping:
+        return mapping[kind]
+    return ""
+
+
+def migrate_workflow_resources_to_dir(
+    workflow_data: Dict[str, Any],
+    dest_dir: str,
+    *,
+    source_images_dir: str = "",
+    source_sounds_dir: str = "",
+    source_yolo_dir: str = "",
+    source_replays_dir: str = "",
+    workflow_filepath: str = "",
+) -> Dict[str, Any]:
+    """把工作流引用的分类资源复制到 dest_dir，并改写卡片路径。不删除源文件。"""
+    dest_root = normalize_workspace_dir(dest_dir)
+    if not dest_root:
+        raise ValueError("资源目录不能为空")
+    ensure_workflow_resource_subdirs(dest_root)
+    dest_dirs = project_resource_dirs(dest_root)
+    app_root = get_app_root()
+    images_source = (
+        normalize_workspace_dir(source_images_dir)
+        if str(source_images_dir or "").strip()
+        else get_images_dir("LCA")
+    )
+    sounds_source = (
+        normalize_workspace_dir(source_sounds_dir)
+        if str(source_sounds_dir or "").strip()
+        else get_sounds_dir("LCA")
+    )
+    if str(source_images_dir or "").strip():
+        dicts_source = os.path.join(images_source, "dicts")
+    else:
+        dicts_source = get_dicts_dir("LCA")
+    source_dirs = {
+        "images_dir": images_source,
+        "sounds_dir": sounds_source,
+        "dicts_dir": dicts_source,
+        "yolo_dir": (
+            normalize_workspace_dir(source_yolo_dir)
+            if str(source_yolo_dir or "").strip()
+            else os.path.join(app_root, "yolo")
+        ),
+        "replays_dir": (
+            normalize_workspace_dir(source_replays_dir)
+            if str(source_replays_dir or "").strip()
+            else os.path.join(app_root, "replays")
+        ),
+        "plugins_dir": get_plugin_dir(),
+    }
+
+    old_root = extract_workflow_resource_path(workflow_data)
+    if old_root and os.path.normcase(old_root) == os.path.normcase(dest_root):
+        old_root = ""
+
+    workflow_body = get_workflow_body(workflow_data)
+    cards = workflow_body.get("cards") if isinstance(workflow_body, dict) else None
+    if not isinstance(cards, list):
+        return {"copied_count": 0, "missing_count": 0, "updated_count": 0}
+
+    from task_workflow.script_resources import (
+        list_card_files,
+        list_script_resources,
+        resource_kind,
+        rewrite_resource_literal,
+    )
+
+    copied_count = 0
+    missing_count = 0
+    updated_count = 0
+    workflow_token = _workflow_file_token(workflow_filepath)
+    migrate_kinds = {"image", "sound", "dict", "model", "replay"}
+
+    for card_data in cards:
+        if not isinstance(card_data, dict):
+            continue
+        parameters = card_data.get("parameters")
+        if not isinstance(parameters, dict):
+            continue
+
+        for param_name, param_value in list(parameters.items()):
+            kind = _resource_param_kind(param_name)
+            if kind == "images_multi":
+                new_value, copied, missing, updated = _migrate_multi_resource_paths(
+                    param_value,
+                    dest_dirs,
+                    old_root,
+                    source_dirs,
+                )
+                copied_count += copied
+                missing_count += missing
+                updated_count += updated
+                if updated > 0:
+                    parameters[param_name] = new_value
+                continue
+            if kind in migrate_kinds:
+                new_value, copied, missing, updated = _migrate_one_resource_path(
+                    param_value,
+                    kind,
+                    dest_dirs,
+                    old_root,
+                    source_dirs,
+                )
+                copied_count += copied
+                missing_count += missing
+                updated_count += updated
+                if updated > 0:
+                    parameters[param_name] = new_value
+
+        source = str(parameters.get("script_source") or "")
+        if not source.strip():
+            continue
+        card_id = _card_id_value(card_data)
+        rewritten = source
+        script_updated = 0
+        for item in list_script_resources(
+            source,
+            images_dir=images_source,
+            sounds_dir=sounds_source,
+            card_id=card_id,
+            workflow_token=workflow_token,
+            yolo_dir=str(source_dirs.get("yolo_dir") or ""),
+            replays_dir=str(source_dirs.get("replays_dir") or ""),
+            dicts_dir=str(source_dirs.get("dicts_dir") or ""),
+        ):
+            if int(item.get("used") or 0) <= 0:
+                continue
+            migrate_kind = _script_migrate_kind(item)
+            if not migrate_kind:
+                continue
+            raw_path = str(item.get("path") or "").strip()
+            if not raw_path:
+                continue
+            new_value, copied, missing, updated = _migrate_one_resource_path(
+                raw_path,
+                migrate_kind,
+                dest_dirs,
+                old_root,
+                source_dirs,
+            )
+            copied_count += copied
+            missing_count += missing
+            if updated > 0 and new_value:
+                rewritten = rewrite_resource_literal(rewritten, raw_path, str(new_value))
+                script_updated += 1
+        if rewritten != source:
+            parameters["script_source"] = rewritten
+            if str(parameters.get("script_source_sha256") or "").strip():
+                from tasks.script_task import script_source_hash
+
+                parameters["script_source_sha256"] = script_source_hash(rewritten)
+            updated_count += script_updated
+
+    prefix_roots = _unique_dirs(
+        old_root,
+        os.path.join(old_root, "images") if old_root else "",
+        os.path.join(old_root, "sounds") if old_root else "",
+        os.path.join(old_root, "yolo") if old_root else "",
+        os.path.join(old_root, "replays") if old_root else "",
+        images_source,
+        sounds_source,
+        str(source_dirs.get("yolo_dir") or ""),
+        str(source_dirs.get("replays_dir") or ""),
+    )
+    kind_map = {
+        "audio": "sound",
+        "image": "image",
+        "model": "model",
+        "replay": "replay",
+    }
+    for card_data in cards:
+        if not isinstance(card_data, dict):
+            continue
+        card_id = _card_id_value(card_data)
+        if card_id is None:
+            continue
+        for root in prefix_roots:
+            for abs_path in list_card_files(root, card_id, workflow_token):
+                migrate_kind = kind_map.get(resource_kind(abs_path) or "")
+                if not migrate_kind:
+                    continue
+                dest_kind_dir, _search_dirs, preserve_roots, kind_folder = _resource_layout(
+                    migrate_kind,
+                    dest_dirs,
+                    old_root,
+                    source_dirs,
+                )
+                dest_path = _resource_dest_path(
+                    abs_path,
+                    dest_kind_dir,
+                    preserve_roots,
+                    kind_folder,
+                )
+                dest_file, copied = _try_copy_resource_file(abs_path, dest_path)
+                if copied:
+                    copied_count += 1
+                if dest_file and migrate_kind == "model":
+                    copied_count += _copy_model_sidecars(abs_path, dest_file)
+
+    return {
+        "copied_count": copied_count,
+        "missing_count": missing_count,
+        "updated_count": updated_count,
+    }
+
+
+def update_workflow_resource_path(filepath: str, resource_dir: str) -> Dict[str, Any]:
     workflow_path = str(filepath or "").strip()
     if not workflow_path:
         raise ValueError("工作流路径不能为空")
@@ -759,46 +1618,122 @@ def update_workflow_gallery_path(filepath: str, gallery_dir: str) -> Dict[str, A
     if workflow_data is None:
         raise ValueError("工作流文件不存在或格式无效")
 
-    normalized_gallery = normalize_workspace_dir(gallery_dir)
-    if normalized_gallery and not os.path.isdir(normalized_gallery):
-        raise ValueError("图库目录不存在")
+    normalized_resource = normalize_workspace_dir(resource_dir)
+    if not normalized_resource or not os.path.isdir(normalized_resource):
+        raise ValueError("资源目录不存在")
+    if not is_exclusive_workflow_dir(normalized_resource, workflow_path):
+        raise ValueError("该文件夹已有其他工作流")
 
     metadata = workflow_data.setdefault("metadata", {})
     if not isinstance(metadata, dict):
         metadata = {}
         workflow_data["metadata"] = metadata
 
-    old_gallery = str(metadata.get("custom_gallery_path") or "").strip()
-    changed = False
-    if normalized_gallery:
-        if old_gallery != normalized_gallery:
-            metadata["custom_gallery_path"] = normalized_gallery
-            changed = True
-    elif old_gallery:
-        metadata.pop("custom_gallery_path", None)
-        changed = True
+    ensure_workflow_resource_subdirs(normalized_resource)
+    metadata.pop("custom_gallery_path", None)
+    migrate_result = migrate_workflow_resources_to_dir(
+        workflow_data,
+        normalized_resource,
+        workflow_filepath=workflow_path,
+    )
+    copied_count = int(migrate_result.get("copied_count") or 0)
+    missing_count = int(migrate_result.get("missing_count") or 0)
+    updated_count = int(migrate_result.get("updated_count") or 0)
+    metadata["custom_resource_path"] = normalized_resource
 
-    updated_image_count = 0
-    if normalized_gallery:
-        updated_image_count = sync_workflow_images_from_gallery(workflow_data, normalized_gallery)
-        if updated_image_count > 0:
-            changed = True
-
-    saved_path = workflow_path
-    if changed:
-        if os.path.isfile(workflow_path):
-            try:
-                backup_workflow_file(workflow_path)
-            except OSError as exc:
-                raise ValueError(f"备份失败，已取消更新图库: {exc}") from exc
-        from task_workflow.workflow_payload import save_workflow_file
-
-        saved_path = str(save_workflow_file(workflow_path, workflow_data))
+    stem, extension = os.path.splitext(os.path.basename(workflow_path))
+    if not extension:
+        extension = ".lca"
+    dest_file = os.path.join(normalized_resource, f"{stem}{extension}")
+    if os.path.isfile(workflow_path):
+        try:
+            backup_workflow_file(workflow_path)
+        except OSError as exc:
+            raise ValueError(f"备份失败，已取消更新资源路径: {exc}") from exc
+    saved_path = _relocate_workspace_workflow(workflow_path, dest_file, workflow_data)
 
     return {
-        "gallery_path": normalized_gallery,
-        "updated_image_count": updated_image_count,
+        "resource_path": normalized_resource,
+        "updated_count": updated_count,
+        "copied_count": copied_count,
+        "missing_count": missing_count,
         "workflow_data": workflow_data,
-        "changed": changed,
+        "changed": True,
         "filepath": saved_path,
     }
+
+
+def _relocate_workspace_workflow(
+    src_path: str,
+    dest_path: str,
+    workflow_data: Dict[str, Any],
+) -> str:
+    src_abs = os.path.abspath(str(src_path or "").strip())
+    dest_abs = os.path.abspath(str(dest_path or "").strip())
+    if not dest_abs:
+        raise ValueError("工作流路径不能为空")
+    dest_dir = os.path.dirname(dest_abs)
+    if dest_dir:
+        os.makedirs(dest_dir, exist_ok=True)
+    same = bool(src_abs) and os.path.normcase(src_abs) == os.path.normcase(dest_abs)
+    if (
+        not same
+        and src_abs.lower().endswith(".lca")
+        and dest_abs.lower().endswith(".lca")
+        and os.path.isfile(src_abs)
+        and not os.path.isfile(dest_abs)
+    ):
+        shutil.copy2(src_abs, dest_abs)
+    saved = _write_workspace_workflow(dest_abs, workflow_data)
+    saved_abs = os.path.abspath(saved)
+    if (
+        not same
+        and src_abs
+        and os.path.isfile(src_abs)
+        and os.path.normcase(src_abs) != os.path.normcase(saved_abs)
+    ):
+        try:
+            os.remove(src_abs)
+        except OSError:
+            pass
+    return saved
+
+
+def _write_workspace_workflow(filepath: str, workflow_data: Dict[str, Any]) -> str:
+    abs_path = os.path.abspath(str(filepath or "").strip())
+    if not abs_path:
+        raise ValueError("工作流路径不能为空")
+    if abs_path.lower().endswith(".lca"):
+        from app_core.lca_format.container import seal_lca_bytes
+        from app_core.lca_format.project_io import ENTRY_WORKFLOW, load_lca_project
+
+        _payload, session = load_lca_project(abs_path)
+        files = session.snapshot_files()
+        entry = ENTRY_WORKFLOW
+        manifest_bytes = files.get("manifest.json")
+        if manifest_bytes:
+            manifest = json.loads(manifest_bytes.decode("utf-8"))
+            if isinstance(manifest, dict):
+                listed = str(manifest.get("entry_workflow") or "").strip()
+                if listed:
+                    entry = listed
+        files[entry] = json.dumps(workflow_data, ensure_ascii=False, indent=4).encode("utf-8")
+        sealed = seal_lca_bytes(files)
+        tmp_path = abs_path + ".tmp"
+        try:
+            with open(tmp_path, "wb") as handle:
+                handle.write(sealed)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(tmp_path, abs_path)
+        except Exception:
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+            raise
+        return abs_path
+    with open(abs_path, "w", encoding="utf-8") as handle:
+        json.dump(workflow_data, handle, ensure_ascii=False, indent=2)
+        handle.write("\n")
+    return abs_path

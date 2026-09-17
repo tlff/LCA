@@ -55,6 +55,11 @@ class WorkflowMultiThreadSession(QObject):
         thread_window_configs: Optional[Dict[int, Dict[str, Any]]] = None,
         get_image_data=None,
         parent=None,
+        sounds_dir: str = None,
+        dicts_dir: str = None,
+        yolo_dir: str = None,
+        replays_dir: str = None,
+        plugins_dir: str = None,
     ):
         super().__init__(parent)
         if not isinstance(cards_data, dict) or not cards_data:
@@ -74,7 +79,24 @@ class WorkflowMultiThreadSession(QObject):
         self.target_window_title = target_window_title
         self.execution_mode = execution_mode or "foreground"
         self.images_dir = images_dir
+        self.sounds_dir = sounds_dir
+        self.dicts_dir = dicts_dir
+        self.yolo_dir = yolo_dir
+        self.replays_dir = replays_dir
+        self.plugins_dir = plugins_dir
         self.target_hwnd = target_hwnd
+        from task_workflow.resource_context import bind_resource_dirs
+
+        bind_resource_dirs(
+            {
+                "images_dir": self.images_dir,
+                "sounds_dir": self.sounds_dir,
+                "dicts_dir": self.dicts_dir,
+                "yolo_dir": self.yolo_dir,
+                "replays_dir": self.replays_dir,
+                "plugins_dir": self.plugins_dir,
+            }
+        )
         self.workflow_id = self._normalize_workflow_id(workflow_id)
         self.workflow_filepath = self._normalize_workflow_filepath(workflow_filepath)
         self.thread_window_configs = self._normalize_thread_window_configs(thread_window_configs)
@@ -324,6 +346,18 @@ class WorkflowMultiThreadSession(QObject):
 
     def run(self):
         """启动会话（被主窗口放入线程调用）。"""
+        from task_workflow.resource_context import bind_resource_dirs
+
+        bind_resource_dirs(
+            {
+                "images_dir": self.images_dir,
+                "sounds_dir": self.sounds_dir,
+                "dicts_dir": getattr(self, "dicts_dir", "") or "",
+                "yolo_dir": getattr(self, "yolo_dir", "") or "",
+                "replays_dir": getattr(self, "replays_dir", "") or "",
+                "plugins_dir": getattr(self, "plugins_dir", "") or "",
+            }
+        )
         with self._lock:
             if self._is_running:
                 raise RuntimeError("多线程会话已在运行中")
@@ -681,6 +715,11 @@ class WorkflowMultiThreadSession(QObject):
             workflow_id=workflow_id,
             workflow_filepath=self.workflow_filepath,
             get_image_data=self.get_image_data,
+            sounds_dir=self.sounds_dir,
+            dicts_dir=getattr(self, "dicts_dir", None),
+            yolo_dir=getattr(self, "yolo_dir", None),
+            replays_dir=getattr(self, "replays_dir", None),
+            plugins_dir=getattr(self, "plugins_dir", None),
         )
         executor.bound_windows = list(getattr(self, "bound_windows", None) or [])
         executor.custom_width = int(getattr(self, "custom_width", 0) or 0)

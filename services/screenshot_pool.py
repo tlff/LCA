@@ -240,6 +240,8 @@ def capture_and_match_template(
     timeout: float = 4.0,
     engine: Optional[str] = None,
     roi: Optional[Tuple[int, int, int, int]] = None,
+    mode: str = "彩色",
+    rotation=0,
 ) -> Dict[str, Any]:
     failed = {
         "success": False,
@@ -287,6 +289,8 @@ def capture_and_match_template(
             needle=template,
             confidence=float(confidence_threshold),
             roi=roi,
+            mode=mode,
+            rotation=rotation,
         )
     except Exception as exc:
         failed["error"] = str(exc) or type(exc).__name__
@@ -744,6 +748,14 @@ def get_screenshot_worker_hard_limit() -> int:
         return max(1, int(os.cpu_count() or 1))
     except Exception:
         return 1
+
+
+def get_screenshot_worker_limit() -> int:
+    """Return the effective concurrent screenshot worker limit."""
+    try:
+        return int(_resolve_effective_worker_limit())
+    except Exception:
+        return get_screenshot_worker_hard_limit()
 
 
 def set_screenshot_worker_limit(limit: Optional[int] = None) -> int:

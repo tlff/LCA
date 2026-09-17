@@ -110,6 +110,20 @@ class ReplayEngine:
         self._stop_requested = True
         logger.info("[回放引擎] 收到停止请求")
 
+    def _interruptible_sleep(self, seconds: float) -> bool:
+        """分段等待。被停止时立刻返回 False。"""
+        remaining = max(0.0, float(seconds or 0.0))
+        if remaining <= 0:
+            return not self._stop_requested
+        deadline = time.perf_counter() + remaining
+        while True:
+            if self._stop_requested:
+                return False
+            left = deadline - time.perf_counter()
+            if left <= 0:
+                return not self._stop_requested
+            time.sleep(left if left < 0.02 else 0.02)
+
     def _get_cursor_pos(self) -> Tuple[int, int]:
         """获取当前鼠标坐标。"""
         x, y = win32api.GetCursorPos()
@@ -524,11 +538,9 @@ class ReplayEngine:
                     # 时间同步
                     target_time = replay_start_time + (action_time / speed)
                     delay = target_time - time.time()
-                    if delay > 0:
-                        if precise_timer:
-                            precise_timer.precise_sleep(delay)
-                        else:
-                            time.sleep(delay)
+                    if delay > 0 and not self._interruptible_sleep(delay):
+                        stopped = True
+                        break
 
                     # 执行动作
                     action_success = self.execute_action(
@@ -547,14 +559,9 @@ class ReplayEngine:
                     break
 
                 if loop < loop_count - 1:
-                    if self._stop_requested:
+                    if self._stop_requested or not self._interruptible_sleep(0.5):
                         stopped = True
                         break
-                    # 循环间隔
-                    if precise_timer:
-                        precise_timer.precise_sleep(0.5)
-                    else:
-                        time.sleep(0.5)
 
             if stopped:
                 logger.info("[回放引擎] 回放已停止")

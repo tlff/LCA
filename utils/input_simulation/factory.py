@@ -12,7 +12,6 @@ from typing import Optional, Dict, Tuple, List
 from utils.runtime_config import get_runtime_config
 from .base import BaseInputSimulator, InputSimulatorType
 from .mode_utils import (
-    PLUGIN_EXECUTION_MODE,
     get_foreground_driver,
     is_foreground_mode,
     is_plugin_input_backend,
@@ -77,6 +76,10 @@ class InputSimulatorFactory:
         if backend not in (SimulatorBackend.AUTO, SimulatorBackend.NATIVE):
             raise BackendNotAvailableError(f"不支持的输入后端: {backend!r}")
 
+        if is_plugin_input_backend(get_runtime_config()):
+            from .plugin_simulator import PluginInputSimulator
+
+            return PluginInputSimulator(hwnd)
         return InputSimulatorFactory._create_native_simulator(
             hwnd, operation_mode, execution_mode, device_id=device_id
         )
@@ -102,9 +105,6 @@ class InputSimulatorFactory:
         """
         from .standard_window import StandardWindowInputSimulator
 
-        # 始终使用标准窗口模式；键鼠走插件时任何前台模式都按后台执行
-        if is_plugin_input_backend(get_runtime_config()):
-            execution_mode = PLUGIN_EXECUTION_MODE
         use_foreground = is_foreground_mode(execution_mode)
         foreground_driver = get_foreground_driver(execution_mode)
         return StandardWindowInputSimulator(
@@ -129,8 +129,8 @@ class GlobalInputSimulatorManager:
     def __init__(self):
         self._default_operation_mode = "auto"
         self._default_execution_mode = "background"  # 恢复默认值
-        self._simulators: Dict[Tuple[int, int, str, str, Optional[str]], BaseInputSimulator] = {}
-        self._simulator_access_ts: Dict[Tuple[int, int, str, str, Optional[str]], float] = {}
+        self._simulators: Dict[Tuple[int, int, str, str, Optional[str], str], BaseInputSimulator] = {}
+        self._simulator_access_ts: Dict[Tuple[int, int, str, str, Optional[str], str], float] = {}
         self._lock = threading.Lock()  # 线程锁，保护缓存字典
         self._enable_cache = True  # 是否启用缓存（可在并发场景禁用）
         self._max_cache_size = self._read_int_env(
@@ -210,7 +210,7 @@ class GlobalInputSimulatorManager:
         self._last_cache_cleanup_ts = time.monotonic()
         return simulators
 
-    def _evict_cache_keys_unlocked(self, keys: List[Tuple[int, int, str, str, Optional[str]]]) -> List[BaseInputSimulator]:
+    def _evict_cache_keys_unlocked(self, keys: List[Tuple[int, int, str, str, Optional[str], str]]) -> List[BaseInputSimulator]:
         removed: List[BaseInputSimulator] = []
         for key in keys:
             simulator = self._simulators.pop(key, None)
@@ -336,7 +336,14 @@ class GlobalInputSimulatorManager:
         thread_id = threading.get_ident()
 
         # 生成缓存键（包含线程ID和device_id）
-        cache_key = (thread_id, hwnd, operation_mode, execution_mode, device_id)
+        cache_key = (
+            thread_id,
+            hwnd,
+            operation_mode,
+            execution_mode,
+            device_id,
+            "plugin" if is_plugin_input_backend(get_runtime_config()) else "native",
+        )
 
         simulators_to_close: List[BaseInputSimulator] = []
         cached_simulator: Optional[BaseInputSimulator] = None

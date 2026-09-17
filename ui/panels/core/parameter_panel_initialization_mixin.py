@@ -15,6 +15,7 @@ class ParameterPanelInitializationMixin:
         self.workflow_cards_info: Dict[int, tuple[str, int]] = {}
         self.app_mapping: Dict[str, str] = {}
         self.images_dir: Optional[str] = None
+        self.sounds_dir: Optional[str] = None
         self.conditional_widgets: Dict[str, QWidget] = {}
         self.target_window_title: Optional[str] = None
         self.target_window_hwnd: Optional[int] = None

@@ -7,6 +7,8 @@ import os
 import re
 from typing import Any, Dict, List, Mapping, Optional
 
+from app_core.player.script_metadata import build_release_metadata
+
 
 def _safe_script_id(raw: str, fallback: str) -> str:
     text = str(raw or "").strip()
@@ -277,7 +279,13 @@ def scripts_meta_from_catalog(catalog: List[Mapping[str, Any]]) -> List[Dict[str
         if not sid:
             continue
         title = str(entry.get("title") or sid).strip() or sid
-        meta.append({"id": sid, "title": title, "path": f"workflows/scripts/{sid}.json"})
+        meta_item: Dict[str, str] = {
+            "id": sid,
+            "title": title,
+            "path": f"workflows/scripts/{sid}.json",
+        }
+        meta_item.update(build_release_metadata(entry.get("workflow_data"), str(entry.get("version") or "1.0.0")))
+        meta.append(meta_item)
     return meta
 
 
@@ -625,5 +633,8 @@ def collect_multi_script_package(
                     workflow_data=copy.deepcopy(workflow_data),
                 )
             )
-        script_meta.append({"id": sid, "title": title, "path": rel})
+        # 必须对资源改写后的工作流计算哈希，与包内实际内容一致。
+        meta_item = {"id": sid, "title": title, "path": rel}
+        meta_item.update(build_release_metadata(workflow_data, str(script.get("version") or "1.0.0")))
+        script_meta.append(meta_item)
     return main, script_meta

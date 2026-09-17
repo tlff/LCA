@@ -104,23 +104,18 @@ class ParameterPanelWidgetFactoryMixin:
         return widget
 
     def _create_bound_window_selector_widget(self, current_value: Any):
+        from task_workflow.thread_window_binding import bound_window_selector_choices
+
         widget = QComboBox(self)
         self._remove_combobox_shadow(widget)
         widget.addItem('使用默认窗口', None)
 
-        enabled_windows = self._get_enabled_bound_windows_for_selector()
-        for idx, window_info in enumerate(enabled_windows, 1):
-            window_title = str(window_info.get('title') or f'窗口{idx}').strip()
-            widget.addItem(f'窗口{idx}: {window_title}', idx)
+        for label, bind_id in bound_window_selector_choices(self._get_enabled_bound_windows_for_selector()):
+            widget.addItem(label, bind_id)
 
-        selected_index = None
-        try:
-            if current_value not in (None, '', 'None', 'none', 0, '0'):
-                selected_index = int(current_value)
-        except Exception:
-            selected_index = None
-        if selected_index is not None and selected_index > 0:
-            combo_index = widget.findData(selected_index)
+        desired = None if current_value in (None, '') else str(current_value).strip()
+        if desired:
+            combo_index = widget.findData(desired)
             if combo_index >= 0:
                 widget.setCurrentIndex(combo_index)
         return widget
@@ -290,8 +285,6 @@ class ParameterPanelWidgetFactoryMixin:
             return self._create_interactive_image_region_widget(name, param_def)
         if widget_hint == 'multi_image_region_selector':
             return self._create_interactive_multi_image_region_widget(name, param_def)
-        if widget_hint == 'yolo_realtime_preview':
-            return self._create_interactive_yolo_preview_widget(param_def)
         if widget_hint == 'color_region_selector':
             return self._create_interactive_color_region_widget(name, param_def)
         return None
@@ -353,12 +346,6 @@ class ParameterPanelWidgetFactoryMixin:
         )
         acc_button.clicked.connect(self._enable_browser_accessibility)
         return acc_button
-
-    def _create_interactive_yolo_preview_widget(self, param_def: Dict[str, Any]):
-        widget = ResponsiveButton(param_def.get('button_text', '启动实时预览'))
-        widget.setProperty('class', 'primary')
-        widget.clicked.connect(self._start_yolo_realtime_preview)
-        return widget
 
     def _create_interactive_colorpicker_widget(self, name: str, current_value: Any):
         from themes import get_theme_manager
@@ -667,10 +654,39 @@ class ParameterPanelWidgetFactoryMixin:
         radio_widget.button_group = button_group
         return radio_widget
 
+    def _choices_for_select(self, name: str, param_def: Dict[str, Any]):
+        hidden_key = f"_{name}_dynamic_options"
+        saved = (getattr(self, "current_parameters", {}) or {}).get(hidden_key)
+        if isinstance(saved, list):
+            normalized = [str(item or "").strip() for item in saved if str(item or "").strip()]
+            if normalized:
+                param_def["options"] = normalized
+                return normalized
+        options_func = str(param_def.get("options_func") or "").strip()
+        loader = getattr(self, "_load_dynamic_options", None)
+        if options_func and callable(loader):
+            source_param = str(param_def.get("source_param") or "").strip()
+            source_value = ""
+            if source_param:
+                getter = getattr(self, "_get_dynamic_source_value", None)
+                if callable(getter):
+                    source_value = str(getter(source_param) or "").strip()
+                if not source_value:
+                    source_value = str(
+                        (getattr(self, "current_parameters", {}) or {}).get(source_param) or ""
+                    ).strip()
+            loaded = loader(source_value, options_func, param_def)
+            if loaded:
+                param_def["options"] = loaded
+                if hasattr(self, "current_parameters") and isinstance(self.current_parameters, dict):
+                    self.current_parameters[hidden_key] = loaded
+                return loaded
+        return param_def.get("choices", param_def.get("options", []))
+
     def _create_numeric_choice_widget(self, name: str, param_def: Dict[str, Any], current_value: Any):
         widget = QComboBox(self)
         self._remove_combobox_shadow(widget)
-        choices = param_def.get('choices', param_def.get('options', []))
+        choices = self._choices_for_select(name, param_def)
         if isinstance(choices, dict):
             for key, value in choices.items():
                 widget.addItem(str(value), key)
@@ -1128,6 +1144,9 @@ class ParameterPanelWidgetFactoryMixin:
             placeholder = param_def.get('placeholder', '')
             if placeholder:
                 widget.setPlaceholderText(placeholder)
+
+            if param_def.get('password'):
+                widget.setEchoMode(QLineEdit.EchoMode.Password)
 
             # 检查是否为只读
             if param_def.get('readonly', False):

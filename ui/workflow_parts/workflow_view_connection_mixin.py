@@ -1,4 +1,27 @@
+from PySide6.QtCore import QEventLoop
+from PySide6.QtGui import QPainterPath
+
 from .workflow_view_common import *
+from .connection_line import painter_path_from_points, set_line_animation_paused
+from .connection_router import (
+    ExistingPath,
+    RouteWorld,
+    _arrives_at_end,
+    _direct_route_usable,
+    paths_conflict,
+    preview_drag_connection,
+    route_connection,
+    start_end_stacked,
+)
+
+_REROUTE_YIELD_EVERY = 12
+_ROUTE_POINT_EPS = 1e-9
+
+
+def _straight_temp_path(start: QPointF, end: QPointF) -> QPainterPath:
+    path = QPainterPath(QPointF(start))
+    path.lineTo(QPointF(end))
+    return path
 
 class WorkflowViewConnectionMixin:
 
@@ -20,6 +43,8 @@ class WorkflowViewConnectionMixin:
             raise ValueError("连线终点不属于当前工作流")
         if start_card.scene() is not self.scene or end_card.scene() is not self.scene:
             raise ValueError("连线两端必须挂载在当前场景")
+        if start_card is end_card:
+            raise ValueError(f"卡片 {start_card.card_id} 不能连接到自己")
         if not isinstance(start_card.connections, list) or not isinstance(end_card.connections, list):
             raise TypeError("卡片连接容器必须是列表")
         if line_type in ("success", "failure") and start_card.restricted_outputs:
@@ -187,6 +212,236 @@ class WorkflowViewConnectionMixin:
         connection.start_item = None
         connection.end_item = None
 
+    def _card_scene_rect_tuple(self, card: TaskCard):
+        rect = card.mapRectToScene(card.boundingRect())
+        return (rect.x(), rect.y(), rect.width(), rect.height())
+
+    def set_canvas_drag_paused(self, paused: bool) -> None:
+        set_line_animation_paused("canvas_drag", bool(paused))
+
+    def reroute_connections(self, cards=None):
+        if getattr(self, "_rerouting_connections", False):
+            return
+        if not isinstance(self.connections, list):
+            raise TypeError("连线容器必须是列表")
+        if not isinstance(self.cards, dict):
+            raise TypeError("卡片容器必须是字典")
+        self._rerouting_connections = True
+        updates_were_enabled = self.updatesEnabled()
+        set_line_animation_paused("canvas_route", True)
+        changed = False
+        try:
+            if updates_were_enabled:
+                self.setUpdatesEnabled(False)
+            if not self.connections:
+                return
+            card_rects = {}
+            for card_id, card in self.cards.items():
+                if not isinstance(card, TaskCard):
+                    raise TypeError(f"卡片 {card_id} 不是 TaskCard")
+                card_rects[id(card)] = self._card_scene_rect_tuple(card)
+            app = QApplication.instance()
+            for index, (connection, points) in enumerate(
+                self._route_connections_fast(card_rects, cards)
+            ):
+                if connection.apply_route_points(points):
+                    changed = True
+                if (
+                    app is not None
+                    and index > 0
+                    and index % _REROUTE_YIELD_EVERY == 0
+                ):
+                    if updates_were_enabled:
+                        self.setUpdatesEnabled(True)
+                    viewport = self.viewport()
+                    if viewport is not None:
+                        viewport.update()
+                    app.processEvents(QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents)
+                    if updates_were_enabled:
+                        self.setUpdatesEnabled(False)
+        finally:
+            self._rerouting_connections = False
+            if updates_were_enabled:
+                self.setUpdatesEnabled(True)
+            set_line_animation_paused("canvas_route", False)
+            if changed:
+                viewport = self.viewport()
+                if viewport is not None:
+                    viewport.update()
+
+    def _route_one_connection(self, connection, obstacles, existing, start_rect, end_rect):
+        start_pos = connection.get_start_pos()
+        end_pos = connection.get_end_pos()
+        return route_connection(
+            (start_pos.x(), start_pos.y()),
+            (end_pos.x(), end_pos.y()),
+            obstacles,
+            existing=existing,
+            start_rect=start_rect,
+            end_rect=end_rect,
+        )
+
+    def _route_connections_fast(self, card_rects, cards=None):
+        moving = None if cards is None else {id(card) for card in cards}
+        world = RouteWorld(card_rects)
+        connections = []
+        for connection in self.connections:
+            if not isinstance(connection, ConnectionLine):
+                raise TypeError("连接对象必须是 ConnectionLine")
+            start_card = connection.start_item
+            end_card = connection.end_item
+            if not isinstance(start_card, TaskCard) or not isinstance(end_card, TaskCard):
+                raise TypeError("连线两端必须是 TaskCard")
+            if moving is not None and id(start_card) not in moving and id(end_card) not in moving:
+                points = connection.route_points()
+                if len(points) >= 2:
+                    world.add_wire(ExistingPath(points), id(end_card))
+                continue
+            connections.append(connection)
+        routed = []
+        for connection in connections:
+            points = self._pick_routed_points(connection, card_rects, world)
+            routed.append((connection, points))
+            if len(points) >= 2:
+                world.add_wire(ExistingPath(points), id(connection.end_item))
+        return routed
+
+    def _apply_route_for_connection(self, connection):
+        if not isinstance(connection, ConnectionLine):
+            raise TypeError("连接对象必须是 ConnectionLine")
+        card_rects = {}
+        for card_id, card in self.cards.items():
+            if not isinstance(card, TaskCard):
+                raise TypeError(f"卡片 {card_id} 不是 TaskCard")
+            card_rects[id(card)] = self._card_scene_rect_tuple(card)
+        world = RouteWorld(card_rects)
+        for other in self.connections:
+            if other is connection:
+                continue
+            if not isinstance(other, ConnectionLine):
+                raise TypeError("连接对象必须是 ConnectionLine")
+            points = other.route_points()
+            if len(points) >= 2:
+                world.add_wire(ExistingPath(points), id(other.end_item))
+        points = self._pick_routed_points(connection, card_rects, world)
+        connection.apply_route_points(points)
+
+    def _pick_routed_points(self, connection, card_rects, world):
+        start_card = connection.start_item
+        end_card = connection.end_item
+        start_pos = connection.get_start_pos()
+        end_pos = connection.get_end_pos()
+        start_pt = (start_pos.x(), start_pos.y())
+        end_pt = (end_pos.x(), end_pos.y())
+        start_marker = id(start_card)
+        end_marker = id(end_card)
+        start_rect = card_rects[start_marker]
+        end_rect = card_rects[end_marker]
+        obstacles, existing = world.nearby(start_pt, end_pt, start_marker, end_marker)
+        current = connection.route_points()
+        if (
+            len(current) >= 2
+            and abs(current[0][0] - start_pt[0]) < _ROUTE_POINT_EPS
+            and abs(current[0][1] - start_pt[1]) < _ROUTE_POINT_EPS
+            and abs(current[-1][0] - end_pt[0]) < _ROUTE_POINT_EPS
+            and abs(current[-1][1] - end_pt[1]) < _ROUTE_POINT_EPS
+            and _direct_route_usable(
+                current, obstacles, start_rect, end_rect, set(), existing
+            )
+        ):
+            return current
+        same_card = any(_arrives_at_end(other, end_pt, end_rect) for other in existing)
+        stacked = start_end_stacked(start_rect, end_rect, obstacles)
+        first = None
+        if not same_card and not stacked:
+            try:
+                first = list(
+                    self._route_one_connection(
+                        connection, obstacles, [], start_rect, end_rect
+                    )
+                )
+            except (RuntimeError, ValueError):
+                first = None
+            if (
+                first is not None
+                and len(first) >= 2
+                and not any(
+                    paths_conflict(first, other, end_pt=end_pt, end_card=end_rect)
+                    for other in existing
+                )
+            ):
+                return first
+        try:
+            points = list(
+                self._route_one_connection(
+                    connection, obstacles, existing, start_rect, end_rect
+                )
+            )
+        except (RuntimeError, ValueError):
+            points = first if first is not None else preview_drag_connection(start_pt, end_pt)
+        if len(points) >= 2:
+            return points
+        fallback = preview_drag_connection(start_pt, end_pt)
+        if len(fallback) >= 2:
+            return fallback
+        return [start_pt, end_pt]
+
+    def preview_moving_card_connections(self, cards):
+        """拖拽卡片时的连线预览：正交跟手，不绕障、不自检。"""
+        if getattr(self, "_rerouting_connections", False):
+            return
+        if not isinstance(self.connections, list):
+            raise TypeError("连线容器必须是列表")
+        moving = {id(card) for card in cards}
+        if not moving:
+            return
+        seen = set()
+        affected = []
+        for card in cards:
+            if not isinstance(card, TaskCard):
+                raise TypeError("拖拽预览对象必须是 TaskCard")
+            card_connections = card.connections
+            if not isinstance(card_connections, list):
+                raise TypeError(f"卡片 {card.card_id} 的连接容器必须是列表")
+            for connection in card_connections:
+                marker = id(connection)
+                if marker in seen:
+                    continue
+                seen.add(marker)
+                if not isinstance(connection, ConnectionLine):
+                    raise TypeError("连接对象必须是 ConnectionLine")
+                start_card = connection.start_item
+                end_card = connection.end_item
+                if not isinstance(start_card, TaskCard) or not isinstance(end_card, TaskCard):
+                    raise TypeError("连线两端必须是 TaskCard")
+                if id(start_card) not in moving and id(end_card) not in moving:
+                    continue
+                affected.append(connection)
+        if not affected:
+            return
+        updates_were_enabled = self.updatesEnabled()
+        changed = False
+        try:
+            if updates_were_enabled:
+                self.setUpdatesEnabled(False)
+            for connection in affected:
+                start_pos = connection.get_start_pos()
+                end_pos = connection.get_end_pos()
+                points = preview_drag_connection(
+                    (start_pos.x(), start_pos.y()),
+                    (end_pos.x(), end_pos.y()),
+                    incoming=True,
+                )
+                if connection.apply_route_points(points):
+                    changed = True
+        finally:
+            if updates_were_enabled:
+                self.setUpdatesEnabled(True)
+            if changed:
+                viewport = self.viewport()
+                if viewport is not None:
+                    viewport.update()
+
     def _create_registered_connection(self, start_card, end_card, line_type):
         connection = ConnectionLine(start_card, end_card, line_type)
         try:
@@ -277,6 +532,8 @@ class WorkflowViewConnectionMixin:
                     )
                     old_connection.start_item = None
                     old_connection.end_item = None
+            if not self._loading_workflow:
+                self._apply_route_for_connection(new_connection)
             return new_connection
         except (TypeError, ValueError, RuntimeError) as exc:
             logger.debug(
@@ -301,6 +558,8 @@ class WorkflowViewConnectionMixin:
             if line_type == "sequential":
                 self.update_card_sequence_display()
             self.connection_deleted.emit(connection)
+            if not self._loading_workflow:
+                self.reroute_connections()
             if not self._loading_workflow and not self._undoing_operation:
                 self._mark_workflow_dirty()
             return True
@@ -335,11 +594,10 @@ class WorkflowViewConnectionMixin:
             return False
 
         start_pos = start_card.get_output_port_scene_pos(port_type)
-        temp_line = TempConnectionLine(
-            start_pos.x(), start_pos.y(), start_pos.x(), start_pos.y()
-        )
+        temp_line = TempConnectionLine()
         temp_line.setPen(self.temp_line_pen)
         temp_line.setZValue(6)
+        temp_line.setPath(_straight_temp_path(start_pos, start_pos))
         self.scene.addItem(temp_line)
 
         self.temp_line = temp_line
@@ -349,6 +607,7 @@ class WorkflowViewConnectionMixin:
         self.is_snapped = False
         self.snapped_target_card = None
         self.setDragMode(QGraphicsView.DragMode.NoDrag)
+        self.set_canvas_drag_paused(True)
         return True
 
     def update_drag_line(self, end_pos_scene: QPointF):
@@ -404,9 +663,8 @@ class WorkflowViewConnectionMixin:
         if nearest is not None:
             self.snapped_target_card, target_pos = nearest
 
-        line = self.temp_line.line()
-        line.setP2(target_pos)
-        self.temp_line.setLine(line)
+        start_pos = self.drag_start_card.get_output_port_scene_pos(self.drag_start_port_type)
+        self.temp_line.setPath(_straight_temp_path(start_pos, target_pos))
         self.temp_line.setPen(self.temp_line_snap_pen if nearest else self.temp_line_pen)
         return self.is_snapped
 
@@ -480,6 +738,7 @@ class WorkflowViewConnectionMixin:
         self.is_snapped = False
         self.snapped_target_card = None
         self.setDragMode(self._original_drag_mode)
+        self.set_canvas_drag_paused(False)
         if cleanup_error is not None:
             raise cleanup_error
 
@@ -773,6 +1032,8 @@ class WorkflowViewConnectionMixin:
         if connections_to_remove and desired_success is None and desired_failure is None:
             if not self._loading_workflow and not self._undoing_operation:
                 self._mark_workflow_dirty()
+            if not self._loading_workflow:
+                self.reroute_connections()
 
     _STRICT_CONNECTION_TYPES = frozenset(("sequential", "success", "failure", "random"))
 

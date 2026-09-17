@@ -5,9 +5,7 @@ from .parameter_panel_picker_overlay import ParameterPanelPickerOverlay
 from ..parameter_panel_support import logger
 from PySide6.QtCore import QThread, Signal
 from utils.window.window_binding_utils import (
-    get_active_bound_window_hwnd,
     get_active_bound_windows,
-    get_active_target_window_title,
 )
 
 class _PackageListFetchThread(QThread):
@@ -1035,119 +1033,8 @@ class ParameterPanelSelectorMixin:
         return enabled_windows
 
     def _get_bound_window_hwnd(self) -> Optional[int]:
-        """获取当前绑定的窗口句柄（带全局验证）"""
-        try:
-            # 1. 优先使用传入的target_window_hwnd(来自标签页绑定或全局配置)
-            if hasattr(self, 'target_window_hwnd') and self.target_window_hwnd:
-                logger.info(f"检测到标签页绑定的窗口句柄: {self.target_window_hwnd}")
-
-                # 【关键修改】验证句柄是否仍在全局绑定列表中
-                if self.main_window and hasattr(self.main_window, 'is_hwnd_bound'):
-                    if self.main_window.is_hwnd_bound(self.target_window_hwnd):
-                        logger.info(f"句柄 {self.target_window_hwnd} 已验证，在全局绑定列表中")
-                        return self.target_window_hwnd
-                    else:
-                        logger.warning(f"句柄 {self.target_window_hwnd} 不在全局绑定列表中，静默切换到第一个有效句柄")
-                        # 静默获取第一个有效句柄
-                        validated_hwnd, is_original = self.main_window.validate_hwnd_or_get_first(self.target_window_hwnd)
-                        if validated_hwnd:
-                            logger.info(f"已静默切换到有效句柄: {validated_hwnd}（不修改标签页绑定）")
-                            return validated_hwnd
-                        else:
-                            logger.warning("没有可用的全局绑定窗口，继续尝试其他方式获取")
-                            # 继续往下执行，尝试从全局配置获取
-                else:
-                    # 如果无法验证（没有主窗口），直接返回
-                    logger.warning("无法验证句柄有效性（未找到主窗口），使用标签页绑定的句柄")
-                    return self.target_window_hwnd
-
-            # 2. 回退到从parent_window的config获取
-            if self.parent_window:
-                # 检查 parent_window 是否有 config 属性
-                if hasattr(self.parent_window, 'config'):
-                    config = self.parent_window.config
-
-                    # config 可能是字典
-                    if isinstance(config, dict):
-                        hwnd = get_active_bound_window_hwnd(config)
-                        if hwnd:
-                            logger.info(f"从活动配置获取窗口句柄: {hwnd}")
-                            return hwnd
-
-                        target_window_title = get_active_target_window_title(config)
-                        if target_window_title:
-                            # 需要通过标题查找窗口句柄
-                            try:
-                                import win32gui
-                                def find_window_by_title(title):
-                                    windows = []
-                                    def enum_windows_callback(hwnd, _):
-                                        if win32gui.IsWindowVisible(hwnd):
-                                            window_title = win32gui.GetWindowText(hwnd)
-                                            if window_title == title:
-                                                windows.append(hwnd)
-                                    win32gui.EnumWindows(enum_windows_callback, None)
-                                    if len(windows) == 1:
-                                        return windows[0]
-                                    if len(windows) > 1:
-                                        logger.warning(f"通过标题找到多个同名窗口，拒绝自动选择: {title} -> {windows}")
-                                    return None
-
-                                hwnd = find_window_by_title(target_window_title)
-                                if hwnd:
-                                    logger.info(f"通过标题查找到窗口句柄: {hwnd}")
-                                    return hwnd
-                            except Exception as e:
-                                logger.warning(f"通过标题查找窗口句柄失败: {e}")
-
-                    # config 可能是对象
-                    else:
-                        active_windows = getattr(config, 'active_bound_windows', None)
-                        if not isinstance(active_windows, list):
-                            active_windows = getattr(config, 'bound_windows', None)
-
-                        if active_windows:
-                            enabled_windows = [w for w in active_windows if w.get('enabled', True)]
-                            if enabled_windows:
-                                hwnd = enabled_windows[0].get('hwnd')
-                                if hwnd:
-                                    logger.info(f"从活动配置对象获取窗口句柄: {hwnd}")
-                                    return hwnd
-
-                        target_window_title = getattr(config, 'active_target_window_title', None) or getattr(config, 'target_window_title', None)
-                        if target_window_title:
-                            # 通过标题查找
-                            try:
-                                import win32gui
-                                def find_window_by_title(title):
-                                    windows = []
-                                    def enum_windows_callback(hwnd, _):
-                                        if win32gui.IsWindowVisible(hwnd):
-                                            window_title = win32gui.GetWindowText(hwnd)
-                                            if window_title == title:
-                                                windows.append(hwnd)
-                                    win32gui.EnumWindows(enum_windows_callback, None)
-                                    if len(windows) == 1:
-                                        return windows[0]
-                                    if len(windows) > 1:
-                                        logger.warning(f"通过标题找到多个同名窗口，拒绝自动选择: {title} -> {windows}")
-                                    return None
-
-                                hwnd = find_window_by_title(target_window_title)
-                                if hwnd:
-                                    logger.info(f"通过标题查找到窗口句柄: {hwnd}")
-                                    return hwnd
-                            except Exception as e:
-                                logger.warning(f"通过标题查找窗口句柄失败: {e}")
-
-            logger.warning("未找到任何窗口句柄")
-            return None
-
-        except Exception as e:
-            logger.error(f"获取绑定窗口句柄时出错: {e}")
-            import traceback
-            logger.error(f"错误详情:\n{traceback.format_exc()}")
-            return None
+        """获取当前绑定的窗口句柄（与坐标/截图工具同一套实时解析）。"""
+        return self._get_target_window_hwnd()
 
     def _on_ocr_region_selected(self, param_name: str, x: int, y: int, width: int, height: int):
         """处理OCR区域选择完成"""
@@ -1384,8 +1271,10 @@ class ParameterPanelSelectorMixin:
         return base_x, base_y, base_rect
 
     def _get_image_center_for_offset(self):
-        image_path = (self.current_parameters.get("image_path") or "").strip()
-        image_paths = (self.current_parameters.get("image_paths") or "").strip()
+        from task_workflow.resource_path import format_resource_text, unwrap_resource_path
+
+        image_path = unwrap_resource_path(self.current_parameters.get("image_path")) or ""
+        image_paths = format_resource_text(self.current_parameters.get("image_paths"))
         if not image_path and not image_paths:
             logger.warning("偏移选择: 未配置图片路径，无法获取图片中心点")
             return None
@@ -1980,43 +1869,6 @@ class ParameterPanelSelectorMixin:
             self.parameters_changed.emit(self.current_card_id, self.current_parameters.copy())
         except Exception as exc:
             logger.error(f"应用找色区域选择结果失败: {exc}")
-
-    def _start_yolo_realtime_preview(self):
-        try:
-            target_hwnd = self._get_bound_window_hwnd()
-            if not target_hwnd:
-                from PySide6.QtWidgets import QMessageBox
-
-                QMessageBox.warning(self, "提示", "请先绑定目标窗口")
-                return
-
-            model_path = self.current_parameters.get('model_path', '')
-            if not model_path:
-                from PySide6.QtWidgets import QMessageBox
-
-                QMessageBox.warning(self, "提示", "请先选择YOLO模型文件")
-                return
-
-            conf_threshold = self.current_parameters.get('confidence_threshold', 0.5)
-            target_classes_str = self.current_parameters.get('target_classes', '')
-            target_classes = None
-            if target_classes_str and target_classes_str != "全部类别":
-                target_classes = [target_classes_str.strip()]
-
-            from tasks.yolo_detection import start_realtime_preview
-
-            start_realtime_preview(
-                hwnd=target_hwnd,
-                model_path=model_path,
-                conf_threshold=conf_threshold,
-                target_classes=target_classes,
-            )
-            logger.info(f"YOLO 实时预览已启动: hwnd={target_hwnd}, model={model_path}")
-        except Exception as exc:
-            from PySide6.QtWidgets import QMessageBox
-
-            logger.error(f"启动 YOLO 实时预览失败: {exc}")
-            QMessageBox.warning(self, "错误", f"启动实时预览失败: {str(exc)}")
 
     def _normalize_region_value(self, value, default):
         try:

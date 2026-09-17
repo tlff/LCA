@@ -235,30 +235,28 @@ class TemplatePreloader:
             "drag_start_image_path",
             "drag_end_image_path",
         )
+        from task_workflow.resource_path import format_resource_text, unwrap_resource_path
+
         for field in single_fields:
-            value = params.get(field)
-            if isinstance(value, str):
-                value = value.strip()
-                if value:
-                    candidates.append(value)
+            value = unwrap_resource_path(params.get(field)) or ""
+            if value:
+                candidates.append(value)
 
         list_fields = ("target_images",)
         for field in list_fields:
             value = params.get(field)
             if isinstance(value, (list, tuple, set)):
                 for item in value:
-                    if isinstance(item, str):
-                        item = item.strip()
-                        if item:
-                            candidates.append(item)
-            elif isinstance(value, str):
-                text_value = value.strip()
-                if not text_value:
-                    continue
-                candidates.extend(self._split_image_path_value(text_value))
+                    text_item = unwrap_resource_path(item) or ""
+                    if text_item:
+                        candidates.append(text_item)
+            else:
+                text_value = format_resource_text(value)
+                if text_value:
+                    candidates.extend(self._split_image_path_value(text_value))
 
-        image_paths_value = params.get("image_paths")
-        if isinstance(image_paths_value, str) and image_paths_value.strip():
+        image_paths_value = format_resource_text(params.get("image_paths"))
+        if image_paths_value:
             candidates.extend(self._split_image_path_value(image_paths_value))
 
         results: List[str] = []

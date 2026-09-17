@@ -230,6 +230,8 @@ class MainWindowRunWorkflowMixin:
 
                 self._sync_favorite_path_after_save(old_filepath, task_item)
 
+                self._sync_saved_task_resources(task_item, latest_workflow_data)
+
                 logger.info(f"任务 '{task_item.name}' 保存和备份成功")
 
                 # 更新标签页状态，移除星号
@@ -358,7 +360,10 @@ class MainWindowRunWorkflowMixin:
 
                 import os
                 from PySide6.QtWidgets import QFileDialog
-                from utils.app_paths import get_workflows_dir
+                from task_workflow.workspace import (
+                    default_new_workflow_filepath,
+                    prepare_exclusive_workflow_save,
+                )
 
                 filepath, _ = QFileDialog.getSaveFileName(
 
@@ -366,10 +371,7 @@ class MainWindowRunWorkflowMixin:
 
                     "保存工作流",
 
-                    os.path.join(
-                        get_workflows_dir(),
-                        os.path.splitext(task.name or "workflow")[0] + ".lca",
-                    ),
+                    default_new_workflow_filepath(os.path.splitext(task.name or "workflow")[0]),
 
                     LCA_SAVE_FILTER
 
@@ -382,11 +384,20 @@ class MainWindowRunWorkflowMixin:
 
                     workflow_data = task_workflow_view.serialize_workflow()
                     old_filepath = task.filepath
+                    filepath = prepare_exclusive_workflow_save(
+                        workflow_data,
+                        filepath,
+                        source_filepath=old_filepath,
+                    )
+                    task.update_workflow_data(workflow_data)
+                    metadata = workflow_data.get("metadata") if isinstance(workflow_data, dict) else {}
+                    task_workflow_view.workflow_metadata = dict(metadata) if isinstance(metadata, dict) else {}
                     task.filepath = filepath
                     task.name = os.path.basename(filepath)
 
                     if task.save_and_backup(workflow_data=workflow_data):
                         self._sync_favorite_path_after_save(old_filepath, task)
+                        self._sync_saved_task_resources(task, workflow_data)
                         task.modified = False
                         save_successful = True
                         logger.info(f"任务保存成功: {task.filepath}")
@@ -952,7 +963,12 @@ class MainWindowRunWorkflowMixin:
                     connections_data=connections_list,
                     execution_mode=self.current_execution_mode,
                     screenshot_engine=self.config.get("screenshot_engine"),
-                    images_dir=self.images_dir,
+                    images_dir=getattr(actual_task, "images_dir", self.images_dir),
+                    sounds_dir=getattr(actual_task, "sounds_dir", None),
+                    dicts_dir=getattr(actual_task, "dicts_dir", None),
+                    yolo_dir=getattr(actual_task, "yolo_dir", None),
+                    replays_dir=getattr(actual_task, "replays_dir", None),
+                    plugins_dir=getattr(actual_task, "plugins_dir", None),
                     workflow_id=workflow_id,
                     workflow_filepath=getattr(actual_task, "filepath", None),
                     start_card_ids=runtime_start_card_ids,

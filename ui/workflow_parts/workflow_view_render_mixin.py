@@ -361,43 +361,91 @@ class WorkflowViewRenderMixin:
             # 注释已清理（原注释编码损坏）
             self.fitInView(self.scene.sceneRect(), Qt.AspectRatioMode.KeepAspectRatio) # Fit to initial rect or default
 
+    def _scene_alive_for_center(self):
+        from shiboken6 import isValid
+
+        try:
+            if not isValid(self):
+                return None
+            scene = getattr(self, "scene", None)
+            if scene is None or not isValid(scene):
+                return None
+            return scene
+        except RuntimeError:
+            return None
+
+    def _place_start_card_at_viewport_top_left(self):
+        from task_workflow.thread_start import is_thread_start_task_type
+
+        scene = self._scene_alive_for_center()
+        if scene is None:
+            return
+        starts = [
+            card
+            for card in self.cards.values()
+            if is_thread_start_task_type(getattr(card, "task_type", ""))
+        ]
+        if len(starts) != 1:
+            return
+        viewport = self.viewport()
+        if viewport is None or viewport.width() <= 0 or viewport.height() <= 0:
+            return
+        margin = FIT_VIEW_PADDING
+        top_left = self.mapToScene(margin, margin)
+        x = top_left.x()
+        y = top_left.y()
+        spacing = int(getattr(self, "_grid_spacing", 20) or 20)
+        if getattr(self, "_grid_enabled", False) and spacing > 0:
+            x = round(x / spacing) * spacing
+            y = round(y / spacing) * spacing
+        starts[0].setPos(x, y)
+        padding = FIT_VIEW_PADDING * 2
+        needed = starts[0].sceneBoundingRect().adjusted(-padding, -padding, padding, padding)
+        scene.setSceneRect(scene.sceneRect().united(needed))
+        self.workflow_metadata.pop("place_start_at_viewport", None)
+
     def _deferred_center_view(self, center_point: QPointF):
         """Deferred function to center the view."""
-        debug_print(f"  [LOAD_DEBUG] Entering DEFERRED center function. Target: {center_point}.") # Log entry
-        # --- Log BEFORE centerOn --- 
+        scene = self._scene_alive_for_center()
+        if scene is None:
+            return
+        debug_print(f"  [LOAD_DEBUG] Entering DEFERRED center function. Target: {center_point}.")
         try:
             pre_center_vp_center = self.viewport().rect().center()
             pre_center_scene_center = self.mapToScene(pre_center_vp_center)
             debug_print(f"  [LOAD_DEBUG] Center BEFORE centerOn call: {pre_center_scene_center}")
         except Exception as pre_e:
             debug_print(f"  [LOAD_DEBUG] Error getting center BEFORE call: {pre_e}")
-        # --- END Log BEFORE ---
 
         try:
-            # --- ADDED: Force scene update before centering ---
             debug_print("  [LOAD_DEBUG] Calling self.scene.update() before centerOn.")
-            self.scene.update()
-            QApplication.processEvents() # Also process events after update, before centerOn
+            scene.update()
+            QApplication.processEvents()
+            scene = self._scene_alive_for_center()
+            if scene is None:
+                return
             debug_print("  [LOAD_DEBUG] Finished scene update and processEvents.")
-            # --- END ADDED ---
 
             self.centerOn(center_point)
-            # --- Log IMMEDIATELY AFTER centerOn (BEFORE processEvents) ---
             try:
                 post_center_vp_center = self.viewport().rect().center()
                 post_center_scene_center = self.mapToScene(post_center_vp_center)
                 debug_print(f"  [LOAD_DEBUG] Center IMMEDIATELY AFTER centerOn call: {post_center_scene_center}")
             except Exception as post_e:
                 debug_print(f"  [LOAD_DEBUG] Error getting center IMMEDIATELY AFTER call: {post_e}")
-            # --- END Log AFTER ---
 
-            # --- Verify actual center point AFTER deferred centerOn AND processEvents --- 
             debug_print("  [LOAD_DEBUG] Calling processEvents...")
-            QApplication.processEvents() # Try processing pending events again
+            QApplication.processEvents()
+            if self._scene_alive_for_center() is None:
+                return
             debug_print("  [LOAD_DEBUG] Finished processEvents.")
             current_viewport_center_view = self.viewport().rect().center()
             actual_scene_center = self.mapToScene(current_viewport_center_view)
             debug_print(f"  [LOAD_DEBUG] VERIFY (Deferred - AFTER processEvents): Actual scene center: {actual_scene_center}")
+        except RuntimeError:
+            if self._scene_alive_for_center() is None:
+                return
+            raise
         except Exception as deferred_center_e:
              logger.error(f"Error during deferred centerOn or verification: {deferred_center_e}", exc_info=True)
 

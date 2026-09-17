@@ -127,8 +127,14 @@ class ControlCenterUiLayoutMixin:
             "给全部窗口分配同一份工作流",
             self.assign_workflow_to_all,
         )
+        self.remove_assign_btn = self._make_toolbar_button(
+            "一键移除",
+            "移除全部窗口已分配的工作流",
+            self.remove_workflows_from_all,
+        )
         toolbar.addWidget(self.assign_btn)
         toolbar.addWidget(self.assign_all_btn)
+        toolbar.addWidget(self.remove_assign_btn)
         toolbar.addStretch(1)
 
         self.start_all_btn = self._make_toolbar_button(
@@ -152,16 +158,10 @@ class ControlCenterUiLayoutMixin:
             "设置定时启动、停止、暂停",
             self.open_timer_dialog,
         )
-        self.stability_test_btn = self._make_toolbar_button(
-            "稳定性实测",
-            "为每个窗口生成互不相同的全功能随机脚本并启动",
-            self.run_stability_test,
-        )
         toolbar.addWidget(self.start_all_btn)
         toolbar.addWidget(self.stop_all_btn)
         toolbar.addWidget(self.pause_all_btn)
         toolbar.addWidget(self.timer_btn)
-        toolbar.addWidget(self.stability_test_btn)
         return toolbar
 
     def _create_status_bar(self):
