@@ -1,5 +1,5 @@
 from ..parameter_panel_support import *
-from utils.window_binding_utils import (
+from utils.window.window_binding_utils import (
     get_active_bound_window_hwnd,
     get_active_bound_windows,
     get_active_target_window_title,

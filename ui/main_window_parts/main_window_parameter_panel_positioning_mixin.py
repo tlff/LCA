@@ -10,7 +10,7 @@ from PySide6.QtWidgets import (
     QTextEdit,
 )
 
-from utils.window_activation_utils import show_and_raise_widget
+from utils.window.window_activation_utils import show_and_raise_widget
 
 logger = logging.getLogger(__name__)
 

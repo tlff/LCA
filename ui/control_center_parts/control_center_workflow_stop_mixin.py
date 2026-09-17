@@ -51,7 +51,7 @@ class ControlCenterWorkflowStopMixin:
 
     def _cleanup_screenshot_runtime_after_global_stop(self):
         try:
-            from utils.screenshot_helper import cleanup_screenshot_engines_on_stop
+            from utils.capture.screenshot_helper import cleanup_screenshot_engines_on_stop
 
             cleanup_screenshot_engines_on_stop(keep_current_engine=True)
         except Exception as e:

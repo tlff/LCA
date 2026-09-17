@@ -1,7 +1,7 @@
 import logging
 
-from utils.hwnd_utils import as_hwnd
-from utils.window_finder import (
+from utils.window.hwnd_utils import as_hwnd
+from utils.window.window_finder import (
     find_all_exact_window_hwnds,
     find_window_with_parent_info,
     resolve_exact_window_match,
@@ -16,7 +16,7 @@ class GlobalSettingsDialogWindowLookupMixin:
     def _load_bound_windows(self):
         """加载已绑定的窗口列表，句柄失效时按窗口特征重连，不删除绑定。"""
         logger.info(f"开始加载绑定窗口，配置中有 {len(self.bound_windows)} 个窗口")
-        from utils.window_identity import refresh_bound_windows
+        from utils.window.window_identity import refresh_bound_windows
         changed = refresh_bound_windows(self.bound_windows)
         logger.info(f"句柄刷新后仍保留 {len(self.bound_windows)} 个绑定窗口")
         if changed:

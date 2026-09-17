@@ -1,7 +1,7 @@
 from .parameter_panel_recording_window_target_mixin import (
     ParameterPanelRecordingWindowTargetMixin,
 )
-from utils.window_activation_utils import resolve_replay_window_offsets_from_config
+from utils.window.window_activation_utils import resolve_replay_window_offsets_from_config
 
 
 class ParameterPanelRecordingReplayStartWindowMixin(ParameterPanelRecordingWindowTargetMixin):

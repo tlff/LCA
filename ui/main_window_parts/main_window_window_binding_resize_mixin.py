@@ -61,7 +61,7 @@ class MainWindowWindowBindingResizeMixin:
             else:
                 logging.info("所有窗口句柄都是唯一的")
             # 使用通用窗口管理器批量调整窗口（异步模式）
-            from utils.universal_window_manager import get_universal_window_manager
+            from utils.window.universal_window_manager import get_universal_window_manager
             window_manager = get_universal_window_manager()
             results = []
             for window_info in enabled_windows:

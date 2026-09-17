@@ -1,5 +1,5 @@
 from ..parameter_panel_support import *
-from utils.window_binding_utils import get_active_bound_window_hwnd
+from utils.window.window_binding_utils import get_active_bound_window_hwnd
 
 
 class ParameterPanelActionsButtonMixin:

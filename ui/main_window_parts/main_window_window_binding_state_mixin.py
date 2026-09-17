@@ -1,12 +1,12 @@
 import logging
 
-from utils.window_binding_utils import (
+from utils.window.window_binding_utils import (
     get_active_target_window_title,
     get_native_bound_windows,
     get_window_binding_mode,
     sync_runtime_window_binding_state,
 )
-from utils.window_identity import match_bound_window, refresh_bound_windows
+from utils.window.window_identity import match_bound_window, refresh_bound_windows
 
 logger = logging.getLogger(__name__)
 

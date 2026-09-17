@@ -1,5 +1,5 @@
 from ..parameter_panel_support import *
-from utils.window_coordinate_common import (
+from utils.window.window_coordinate_common import (
     build_window_info,
     get_available_geometry_for_widget,
     get_qt_virtual_desktop_rect,

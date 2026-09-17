@@ -39,7 +39,7 @@ class MouseMoveFixer:
 
     def _resolve_monitor_manager(self):
         if self._monitor_manager is None:
-            from utils.multi_monitor_manager import get_multi_monitor_manager
+            from utils.window.multi_monitor_manager import get_multi_monitor_manager
 
             manager = get_multi_monitor_manager()
             if manager is None:
@@ -63,7 +63,7 @@ class MouseMoveFixer:
 
     def move_to_client_coord(self, hwnd, client_x, client_y) -> None:
         screen_x, screen_y = self.client_to_clamped_screen(hwnd, client_x, client_y)
-        from utils.foreground_input_manager import get_foreground_input_manager
+        from utils.input.foreground_input_manager import get_foreground_input_manager
 
         moved = get_foreground_input_manager().move_mouse(screen_x, screen_y, absolute=True)
         if not moved:

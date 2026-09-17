@@ -7,7 +7,7 @@ except ImportError:
     win32gui = None
     PYWIN32_AVAILABLE = False
 
-from utils.window_finder import (
+from utils.window.window_finder import (
     find_all_exact_window_hwnds,
     find_window_with_parent_info,
     resolve_exact_window_match,

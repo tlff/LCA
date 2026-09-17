@@ -22,14 +22,14 @@ import numpy as np
 import cv2
 from ..widgets.custom_widgets import CustomDropdown as QComboBox
 from ..system_parts.menu_style import apply_unified_menu_style
-from utils.thread_start_utils import is_thread_start_task_type
-from utils.window_binding_utils import (
+from task_workflow.thread_start import is_thread_start_task_type
+from utils.window.window_binding_utils import (
     get_active_bound_window_hwnd,
     get_active_bound_windows,
     get_active_target_window_title,
 )
-from utils.window_activation_utils import show_and_activate_overlay
-from utils.window_finder import resolve_unique_window_hwnd
+from utils.window.window_activation_utils import show_and_activate_overlay
+from utils.window.window_finder import resolve_unique_window_hwnd
 
 
 # ===== 自定义SpinBox类，禁用滚轮修改数值 =====
@@ -1803,7 +1803,7 @@ class ParameterDialog(QDialog):
     def _start_element_picking(self):
         """开始元素拾取 - 按F2确认"""
         try:
-            from utils.element_picker import ElementPicker, ElementInfo
+            from utils.window.element_picker import ElementPicker, ElementInfo
 
             if not ElementPicker.is_available():
                 from PySide6.QtWidgets import QMessageBox
@@ -1824,7 +1824,7 @@ class ParameterDialog(QDialog):
 
             def wait_for_hotkey():
                 try:
-                    from utils.uiautomation_runtime import import_uiautomation, uiautomation_thread_context
+                    from utils.input.uiautomation_runtime import import_uiautomation, uiautomation_thread_context
 
                     import keyboard
                     auto = import_uiautomation()

@@ -1,6 +1,6 @@
 from ..parameter_panel_support import *
 from .parameter_panel_picker_overlay import ParameterPanelPickerOverlay
-from utils.window_activation_utils import show_and_activate_overlay
+from utils.window.window_activation_utils import show_and_activate_overlay
 
 
 class ParameterPanelSelectorPickerStartMixin:
@@ -23,7 +23,7 @@ class ParameterPanelSelectorPickerStartMixin:
             self._set_element_picker_button_state(False)
 
     def _ensure_element_picker_available(self) -> bool:
-        from utils.element_picker import ElementPicker
+        from utils.window.element_picker import ElementPicker
 
         if ElementPicker.is_available():
             return True

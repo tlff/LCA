@@ -2,8 +2,8 @@ import logging
 
 from PySide6.QtWidgets import QInputDialog, QMessageBox
 
-from utils.hwnd_utils import as_hwnd
-from utils.window_identity import apply_window_identity
+from utils.window.hwnd_utils import as_hwnd
+from utils.window.window_identity import apply_window_identity
 
 logger = logging.getLogger(__name__)
 

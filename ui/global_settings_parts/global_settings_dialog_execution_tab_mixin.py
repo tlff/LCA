@@ -360,7 +360,7 @@ class GlobalSettingsDialogExecutionTabMixin:
         return str(engine or "").strip().lower()
 
     def _is_wgc_desktop_combination(self) -> bool:
-        from utils.window_identity import is_wgc_with_desktop_target
+        from utils.window.window_identity import is_wgc_with_desktop_target
 
         return is_wgc_with_desktop_target(
             self._get_selected_screenshot_engine(),
@@ -368,7 +368,7 @@ class GlobalSettingsDialogExecutionTabMixin:
         )
 
     def _warn_wgc_desktop_engine(self) -> None:
-        from utils.window_identity import WGC_DESKTOP_ENGINE_MESSAGE
+        from utils.window.window_identity import WGC_DESKTOP_ENGINE_MESSAGE
 
         QMessageBox.warning(self, "请修改截图引擎", WGC_DESKTOP_ENGINE_MESSAGE)
 

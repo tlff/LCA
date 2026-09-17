@@ -1,4 +1,4 @@
-from utils.window_activation_utils import (
+from utils.window.window_activation_utils import (
     activate_window,
     load_enabled_bound_window_hwnd_from_config,
     resolve_window_activation_hwnd,

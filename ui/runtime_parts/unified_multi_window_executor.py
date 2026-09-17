@@ -16,7 +16,7 @@ from contextlib import asynccontextmanager
 from collections import defaultdict, deque
 
 from task_workflow.process_proxy import create_process_workflow_runtime
-from utils.thread_start_utils import THREAD_START_TASK_TYPE, is_thread_start_task_type
+from task_workflow.thread_start import THREAD_START_TASK_TYPE, is_thread_start_task_type
 
 # PySide6 异步支持
 from PySide6.QtCore import QObject, Signal, QThread
@@ -2367,7 +2367,7 @@ class UnifiedMultiWindowExecutor(QObject):
                 logger.info(f"多窗口执行器使用全局execution_mode: {global_execution_mode}")
             else:
                 logger.info("多窗口执行器未设置全局execution_mode，使用默认后台一模式")
-            from utils.screenshot_helper import get_screenshot_engine
+            from utils.capture.screenshot_helper import get_screenshot_engine
 
             screenshot_engine = str(get_screenshot_engine() or "").strip().lower()
             workflow_id = f"window_{window.hwnd}_{id(window)}"
@@ -2635,7 +2635,7 @@ class UnifiedMultiWindowExecutor(QObject):
 
                 # 【内存泄漏修复】停止后清理截图缓存和内存
                 try:
-                    from utils.screenshot_helper import clear_screenshot_cache
+                    from utils.capture.screenshot_helper import clear_screenshot_cache
                     clear_screenshot_cache()
                     logger.info("[停止清理] 已清理截图帧缓存")
                 except Exception as e:
@@ -2705,7 +2705,7 @@ class UnifiedMultiWindowExecutor(QObject):
 
             # 【内存泄漏修复】异步停止后也要清理截图缓存和GC
             try:
-                from utils.screenshot_helper import clear_screenshot_cache
+                from utils.capture.screenshot_helper import clear_screenshot_cache
                 clear_screenshot_cache()
                 logger.info("[异步停止清理] 已清理截图帧缓存")
             except Exception as e:

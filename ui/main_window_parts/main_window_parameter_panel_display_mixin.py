@@ -1,6 +1,6 @@
 import logging
 from typing import Any, Dict
-from utils.window_binding_utils import get_active_bound_window_hwnd, get_active_target_window_title
+from utils.window.window_binding_utils import get_active_bound_window_hwnd, get_active_target_window_title
 
 logger = logging.getLogger(__name__)
 

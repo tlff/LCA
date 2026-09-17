@@ -1,5 +1,5 @@
 from ..parameter_panel_support import *
-from utils.window_activation_utils import show_and_raise_widget
+from utils.window.window_activation_utils import show_and_raise_widget
 
 
 class ParameterPanelWindowActivationPanelMixin:

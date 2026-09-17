@@ -1,5 +1,5 @@
 from ..parameter_panel_support import *
-from utils.uiautomation_runtime import import_uiautomation, uiautomation_thread_context
+from utils.input.uiautomation_runtime import import_uiautomation, uiautomation_thread_context
 
 
 class ParameterPanelSelectorPickerRuntimeMixin:
@@ -91,7 +91,7 @@ class ParameterPanelSelectorPickerRuntimeMixin:
 
     def _build_picked_info_from_element(self, element):
         try:
-            from utils.element_picker import ElementInfo
+            from utils.window.element_picker import ElementInfo
 
             rect = getattr(element, 'BoundingRectangle', None)
             return ElementInfo(
