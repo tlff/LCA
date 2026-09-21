@@ -118,7 +118,13 @@ class MainWindowWindowBindingMixin:
 
     def _find_window_by_title(self, title):
 
-        """查找窗口，支持顶级窗口和子窗口。"""
+        """查找窗口，支持顶级窗口和子窗口。
+
+        为避免受保护进程上整系统窗口枚举 hang UI 线程，本函数不再主动
+        调 resolve_bound_window_hwnd 做稳定特征匹配；保持原有的精确标题
+        枚举 + 子窗口扫描逻辑。自动重绑逻辑由 refresh_bound_windows /
+        _silent_window_retry 在后台场景处理。
+        """
 
         if not PYWIN32_AVAILABLE or win32gui is None:
             return None

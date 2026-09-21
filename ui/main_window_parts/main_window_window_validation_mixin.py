@@ -205,7 +205,11 @@ class MainWindowWindowValidationMixin:
 
     def _check_window_validity_runtime(self):
 
-        """运行时检查窗口有效性"""
+        """运行时检查窗口有效性。
+
+        任务未运行时也允许静默重连：LCA 刚启动时缓存 HWND 可能已失效，
+        需要尽快刷新而不能等用户先启动任务。
+        """
 
         import win32gui
 
@@ -223,8 +227,9 @@ class MainWindowWindowValidationMixin:
 
         if not is_running:
 
-            # 任务未运行时不需要频繁检查
-
+            # 任务未运行时只做"轻量重连"：不弹窗、不累计失败计数、不停任务。
+            enabled_windows_idle = [w for w in self.bound_windows if w.get('enabled', True)]
+            self._silent_window_retry(enabled_windows_idle)
             return
 
         enabled_windows = [w for w in self.bound_windows if w.get('enabled', True)]
@@ -320,6 +325,69 @@ class MainWindowWindowValidationMixin:
             logger.critical(f"[窗口监控] 所有绑定窗口都已失效: {windows_failed}")
 
             self._handle_all_windows_lost()
+
+    def _silent_window_retry(self, enabled_windows):
+        """任务未运行时静默重连绑定窗口。
+
+        仅尝试 resolve_bound_window_hwnd 一次，不弹警告、不停任务。
+        用于 LCA 刚启动或任务未跑期间缓存 HWND 已失效的场景。
+        受保护进程上 cmdline 可能 hang —— 必须用后台线程 + join 超时，
+        超时就跳过本轮，绝不阻塞 UI 线程。
+        """
+        try:
+            from utils.window.window_identity import is_window_alive
+        except Exception:
+            return
+
+        changed = False
+        for window_info in enabled_windows or []:
+            if not isinstance(window_info, dict):
+                continue
+            cached = window_info.get("hwnd", 0) or 0
+            if cached and is_window_alive(cached):
+                continue  # 缓存 HWND 仍存活，跳过
+            try:
+                new_hwnd = self._call_resolve_with_timeout(window_info, timeout_sec=0.5)
+                if new_hwnd and is_window_alive(new_hwnd):
+                    window_info["hwnd"] = new_hwnd
+                    changed = True
+                    logger.info(
+                        "[窗口监控/静默重连] 缓存 HWND 失效，已重新解析: %s -> %s",
+                        window_info.get("title"), new_hwnd,
+                    )
+            except Exception as exc:
+                logger.debug("[窗口监控/静默重连] 异常: %s", exc)
+
+        if changed:
+            try:
+                self._save_config_silent()
+            except Exception as exc:
+                logger.debug("[窗口监控/静默重连] 保存配置失败: %s", exc)
+
+    @staticmethod
+    def _call_resolve_with_timeout(window_info: dict, *, timeout_sec: float) -> int:
+        """后台线程跑 resolve_bound_window_hwnd，超时返回 0。
+
+        防止受保护进程 / 残留 cmdline 调用把 UI 线程 hang 住。
+        """
+        import threading
+        from utils.window.window_identity import resolve_bound_window_hwnd
+
+        result_box: list[int] = [0]
+
+        def worker() -> None:
+            try:
+                result_box[0] = int(resolve_bound_window_hwnd(window_info) or 0)
+            except Exception:
+                result_box[0] = 0
+
+        thread = threading.Thread(target=worker, daemon=True, name="SilentWindowRetry")
+        thread.start()
+        thread.join(timeout_sec)
+        if thread.is_alive():
+            logger.debug("[窗口监控/静默重连] resolve 超时(%.2fs)，放弃: %s", timeout_sec, window_info.get("title"))
+            return 0
+        return result_box[0]
 
     def _readjust_all_bound_windows(self):
 

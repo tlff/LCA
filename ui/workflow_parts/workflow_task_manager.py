@@ -253,14 +253,21 @@ class WorkflowTaskManager(QObject):
             plugins_dir=str(resource_dirs.get("plugins_dir") or ""),
         )
         apply_resource_dirs_to_task(task, resource_dirs, self.images_dir)
+        logger.info("[调试] add_task: apply_resource_dirs_to_task 完成 (task_id=%s)", task_id)
 
         # 连接任务信号
         task.status_changed.connect(partial(self._on_task_status_changed, task_id))
         task.runtime_cleanup_finished.connect(partial(self._on_task_runtime_cleanup_finished, task_id))
+        logger.info("[调试] add_task: 信号已连接 (task_id=%s)", task_id)
 
         # 添加到管理器
         self.tasks[task_id] = task
+        logger.info("[调试] add_task: 已加入 self.tasks (task_id=%s)", task_id)
+
+        task_added_log = logger.info
+        task_added_log("[调试] add_task: 即将 emit task_added (task_id=%s)", task_id)
         self.task_added.emit(task_id)
+        task_added_log("[调试] add_task: task_added emit 已返回 (task_id=%s)", task_id)
 
         logger.info(f"添加任务成功: ID={task_id}, 名称='{name}'")
         return task_id

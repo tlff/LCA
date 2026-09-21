@@ -216,6 +216,31 @@ def _cmdline_instance_key(process: Any, timeout_sec: float = 0.15) -> str:
     return result[0]
 
 
+def _safe_psutil_call(func, *, timeout_sec: float = 0.2):
+    """在后台线程跑 psutil 调用，超时返回空串。
+
+    受保护进程上 psutil 调用可能 hang（GIL 不释放直到系统调用返回），
+    UI 线程上绝不能阻塞；超时即视为采不到。
+    """
+    import threading
+
+    box: list[Any] = [""]
+
+    def _worker() -> None:
+        try:
+            box[0] = func()
+        except Exception:
+            box[0] = ""
+
+    thread = threading.Thread(target=_worker, daemon=True, name="PsutilSafeCall")
+    thread.start()
+    thread.join(timeout_sec)
+    if thread.is_alive():
+        logger.debug("psutil 调用超时(%.2fs)，已跳过", timeout_sec)
+        return ""
+    return box[0]
+
+
 def _get_window_process_info(
     hwnd: int,
     pid_cache: Optional[Dict[int, Dict[str, str]]] = None,
@@ -238,7 +263,13 @@ def _get_window_process_info(
             import psutil
 
             process = psutil.Process(pid)
-            process_name = _normalize_text(process.name())
+            # name() 在受保护进程上偶发 hang —— 用后台线程硬超时，UI 线程
+            # 路径上绝不能被阻塞。失败就当采不到，回退到 win32 模块名。
+            try:
+                process_name = _safe_psutil_call(process.name, timeout_sec=0.2)
+            except Exception:
+                process_name = ""
+            process_name = _normalize_text(process_name)
             if include_instance_key:
                 instance_key = _cmdline_instance_key(process)
         except Exception:
@@ -488,14 +519,37 @@ def _select_candidates(
     if not snapshots:
         return []
 
+    # 1) 严格指纹：title/class/process/instance_key 全部精确相等
     strict = [item for item in snapshots if _same_fingerprint(item, identity, require_title=True)]
     if strict:
         return sorted(strict, key=_snapshot_sort_key)
 
-    # 标题变了，但类名和进程名都还在，用宽松匹配
+    # 2) 标题变了，但类名和进程名都还在，用宽松匹配
     if identity.get("class_name") and identity.get("process_name"):
         relaxed = [item for item in snapshots if _same_fingerprint(item, identity, require_title=False)]
-        return sorted(relaxed, key=_snapshot_sort_key)
+        if relaxed:
+            return sorted(relaxed, key=_snapshot_sort_key)
+
+    # 3) 只有 title 可用时的兜底：精确标题唯一命中才返回
+    #    标题经 sanitize 后比对，避免 "(HWND:1234)" 这类显示后缀导致误匹配。
+    #    多候选拒绝，让上层继续走人工介入路径，避免误绑。
+    if identity.get("title"):
+        target_title = identity["title"]
+        title_only = [
+            item for item in snapshots
+            if _normalize_text(item.get("title")) == target_title
+        ]
+        if len(title_only) == 1:
+            logger.info(
+                "窗口身份仅靠 title 唯一命中: %s -> HWND:%s",
+                target_title, as_hwnd(title_only[0].get("hwnd")),
+            )
+            return [title_only[0]]
+        if len(title_only) > 1:
+            logger.warning(
+                "title-only 候选不唯一，跳过自动重连避免绑错: %s -> %s 个候选",
+                target_title, len(title_only),
+            )
     return []
 
 
@@ -564,8 +618,26 @@ def apply_window_identity(
         window_info["process_name"] = live["process_name"]
     if live.get("instance_key"):
         window_info["instance_key"] = live["instance_key"]
-    if not _normalize_text(window_info.get("title")) and live.get("title"):
-        window_info["title"] = live["title"]
+
+    # 标题有值时不覆盖（保持用户看到的名字）；但如果旧标题 sanitize 后与运行时
+    # 真实标题不一致（说明旧值是占位/错误），把旧值留作 observed_title，用 live
+    # 真值覆盖，避免下次重连继续用错的标题。
+    existing_title = _normalize_text(window_info.get("title"))
+    live_title = _normalize_text(live.get("title"))
+    if live_title:
+        existing_sanitized = _sanitize_title(existing_title)
+        live_sanitized = _sanitize_title(live_title)
+        if not existing_title:
+            window_info["title"] = live_title
+        elif existing_sanitized != live_sanitized:
+            window_info["observed_title"] = existing_title
+            window_info["title"] = live_title
+            logger.debug(
+                "修正绑定记录的占位标题: %s -> %s",
+                existing_title, live_title,
+            )
+        # else: sanitize 后相等，不动
+
     if not _normalize_text(window_info.get("bind_id")):
         window_info["bind_id"] = str(uuid.uuid4())
 
@@ -730,8 +802,6 @@ def resolve_workflow_window_binding(
 
         # 单窗口匹配有便捷回退；导入时仍需稳定依据，避免静默绑到无关窗口。
         if same_id or same_title or same_hwnd:
-            if not alive(matched_hwnd):
-                matched_hwnd = resolve_bound_window_hwnd(matched, hwnd_alive=alive)
             if matched_hwnd and alive(matched_hwnd):
                 resolved = dict(window_binding)
                 resolved["target_hwnd"] = matched_hwnd
@@ -742,6 +812,15 @@ def resolve_workflow_window_binding(
                     or bind_id
                 )
                 return resolved
+            # matched hwnd 失效时绝不在导入路径触发整系统窗口枚举
+            # (resolve_bound_window_hwnd 会 enumerate + 调 psutil.name，
+            #  在受保护进程上累积 0.2s 超时 → 启动卡死)。让工作流保留
+            # stale hwnd，等用户下次在全局设置里手动重连。
+            logger.debug(
+                "工作流绑定窗口已失效 (HWND=%s)，跳过自动重连避免 enumeration 卡死",
+                matched_hwnd,
+            )
+            return None
 
     if old_hwnd and alive(old_hwnd):
         resolved = dict(window_binding)
